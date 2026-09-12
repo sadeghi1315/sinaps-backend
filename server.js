@@ -12,13 +12,9 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const ENERGY_REGEN_SECONDS = 3;
-const DAILY_BONUS = 100;
-
-
-/* =========================
-   HOME
-========================= */
+// ===============================
+// HOME
+// ===============================
 
 app.get("/", (req, res) => {
   res.json({
@@ -28,75 +24,13 @@ app.get("/", (req, res) => {
   });
 });
 
-
-/* =========================
-   ENERGY CALCULATION
-========================= */
-
-function calculateEnergy(user) {
-
-  const now = Date.now();
-
-  const lastUpdate =
-    new Date(user.last_energy_update).getTime();
-
-  const elapsedSeconds =
-    Math.floor(
-      (now - lastUpdate) / 1000
-    );
-
-  if (elapsedSeconds <= 0) {
-    return {
-      energy: Number(user.energy),
-      lastEnergyUpdate: user.last_energy_update
-    };
-  }
-
-  const regenerated =
-    Math.floor(
-      elapsedSeconds / ENERGY_REGEN_SECONDS
-    );
-
-  if (regenerated <= 0) {
-    return {
-      energy: Number(user.energy),
-      lastEnergyUpdate: user.last_energy_update
-    };
-  }
-
-  const newEnergy =
-    Math.min(
-      Number(user.max_energy),
-      Number(user.energy) + regenerated
-    );
-
-  const usedSeconds =
-    regenerated * ENERGY_REGEN_SECONDS;
-
-  const newLastUpdate =
-    new Date(
-      lastUpdate + usedSeconds * 1000
-    ).toISOString();
-
-  return {
-    energy: newEnergy,
-    lastEnergyUpdate: newLastUpdate
-  };
-}
-
-
-/* =========================
-   USER
-========================= */
+// ===============================
+// USER
+// ===============================
 
 app.post("/api/user", async (req, res) => {
-
   try {
-
-    const {
-      telegram_id,
-      username
-    } = req.body;
+    const { telegram_id, username } = req.body;
 
     if (!telegram_id) {
       return res.status(400).json({
@@ -104,89 +38,52 @@ app.post("/api/user", async (req, res) => {
       });
     }
 
-
-    let {
-      data: user,
-      error
-    } = await supabase
+    let { data: user, error } = await supabase
       .from("users")
       .select("*")
       .eq("telegram_id", telegram_id)
-      .single();
+      .maybeSingle();
 
+    if (error) {
+      console.error("User select error:", error);
 
-    if (
-      error &&
-      error.code !== "PGRST116"
-    ) {
-      throw error;
+      return res.status(500).json({
+        error: "Failed to load user",
+        details: error.message
+      });
     }
 
-
-    /* CREATE USER */
-
+    // Create user if not exists
     if (!user) {
-
-      const result =
+      const { data: newUser, error: insertError } =
         await supabase
           .from("users")
           .insert({
             telegram_id: telegram_id,
-            username: username || null
+            username: username || null,
+            balance: 0,
+            energy: 1000,
+            max_energy: 1000
           })
           .select()
           .single();
 
-      if (result.error) {
-        throw result.error;
+      if (insertError) {
+        console.error("User insert error:", insertError);
+
+        return res.status(500).json({
+          error: "Failed to create user",
+          details: insertError.message
+        });
       }
 
-      user = result.data;
+      user = newUser;
     }
-
-
-    /* ENERGY REGEN */
-
-    const energyData =
-      calculateEnergy(user);
-
-
-    if (
-      energyData.energy !==
-      Number(user.energy)
-    ) {
-
-      const result =
-        await supabase
-          .from("users")
-          .update({
-            energy: energyData.energy,
-            last_energy_update:
-              energyData.lastEnergyUpdate
-          })
-          .eq(
-            "telegram_id",
-            telegram_id
-          )
-          .select()
-          .single();
-
-      if (result.error) {
-        throw result.error;
-      }
-
-      user = result.data;
-    }
-
 
     res.json(user);
 
   } catch (error) {
-
-    console.error(
-      "USER ERROR:",
-      error
-    );
+    console.error("USER API ERROR:", error);
 
     res.status(500).json({
       error: "Server error"
@@ -194,198 +91,206 @@ app.post("/api/user", async (req, res) => {
   }
 });
 
-
-/* =========================
-   TAP
-========================= */
+// ===============================
+// TAP
+// ===============================
 
 app.post("/api/tap", async (req, res) => {
-
   try {
-
     const {
       telegram_id,
       taps,
       power
     } = req.body;
 
-
     if (!telegram_id) {
       return res.status(400).json({
         error: "telegram_id required"
       });
     }
 
+    const tapCount = Math.max(
+      1,
+      Math.min(Number(taps) || 1, 100)
+    );
 
-    /* TAP COUNT */
+    const tapPower = Math.max(
+      1,
+      Number(power) || 1
+    );
 
-    let tapCount =
-      Number(taps || 1);
-
-    if (!Number.isFinite(tapCount)) {
-      tapCount = 1;
-    }
-
-    tapCount =
-      Math.floor(tapCount);
-
-    tapCount =
-      Math.max(
-        1,
-        Math.min(50, tapCount)
-      );
-
-
-    /* POWER */
-
-    let tapPower =
-      Number(power || 1);
-
-    if (
-      tapPower !== 2
-    ) {
-      tapPower = 1;
-    }
-
-
-    /* GET USER */
-
-    const {
-      data: user,
-      error
-    } = await supabase
+    const { data: user, error } = await supabase
       .from("users")
       .select("*")
       .eq("telegram_id", telegram_id)
-      .single();
+      .maybeSingle();
 
+    if (error) {
+      console.error("Tap user error:", error);
 
-    if (
-      error ||
-      !user
-    ) {
+      return res.status(500).json({
+        error: "Failed to load user"
+      });
+    }
 
+    if (!user) {
       return res.status(404).json({
         error: "User not found"
       });
     }
-
-
-    /* ENERGY */
-
-    const energyData =
-      calculateEnergy(user);
 
     const availableEnergy =
-      Number(energyData.energy);
+      Number(user.energy) || 0;
 
+    const actualTaps = Math.min(
+      tapCount,
+      availableEnergy
+    );
 
-    const acceptedTaps =
-      Math.min(
-        tapCount,
-        availableEnergy
-      );
-
-
-    if (
-      acceptedTaps <= 0
-    ) {
-
+    if (actualTaps <= 0) {
       return res.status(400).json({
-
         error: "No energy",
-
-        balance:
-          Number(user.balance),
-
-        energy: 0,
-
-        max_energy:
-          Number(user.max_energy),
-
-        accepted_taps: 0
+        balance: Number(user.balance) || 0,
+        energy: availableEnergy,
+        max_energy: Number(user.max_energy) || 1000
       });
     }
 
-
-    /* REWARD */
-
     const earned =
-      acceptedTaps *
-      tapPower;
-
+      actualTaps * tapPower;
 
     const newBalance =
-      Number(user.balance) +
-      earned;
-
+      (Number(user.balance) || 0) + earned;
 
     const newEnergy =
-      availableEnergy -
-      acceptedTaps;
+      availableEnergy - actualTaps;
 
+    const { data: updated, error: updateError } =
+      await supabase
+        .from("users")
+        .update({
+          balance: newBalance,
+          energy: newEnergy,
+          last_energy_update: new Date().toISOString()
+        })
+        .eq("telegram_id", telegram_id)
+        .select()
+        .single();
 
-    /* UPDATE */
+    if (updateError) {
+      console.error("Tap update error:", updateError);
 
+      return res.status(500).json({
+        error: "Failed to update balance",
+        details: updateError.message
+      });
+    }
+
+    res.json(updated);
+
+  } catch (error) {
+    console.error("TAP API ERROR:", error);
+
+    res.status(500).json({
+      error: "Server error"
+    });
+  }
+});
+
+// ===============================
+// WALLET CONNECT
+// ===============================
+
+app.post("/api/wallet/connect", async (req, res) => {
+  try {
     const {
-      data: updated,
+      telegram_id,
+      wallet_address
+    } = req.body;
+
+    if (!telegram_id || !wallet_address) {
+      return res.status(400).json({
+        error: "telegram_id and wallet_address required"
+      });
+    }
+
+    const cleanAddress =
+      String(wallet_address).trim();
+
+    if (cleanAddress.length < 20) {
+      return res.status(400).json({
+        error: "Invalid wallet address"
+      });
+    }
+
+    // Check if wallet is already connected
+    const {
+      data: existingWallet,
+      error: walletCheckError
+    } = await supabase
+      .from("users")
+      .select("telegram_id")
+      .eq("wallet_address", cleanAddress)
+      .maybeSingle();
+
+    if (walletCheckError) {
+      console.error(
+        "Wallet check error:",
+        walletCheckError
+      );
+
+      return res.status(500).json({
+        error: "Wallet check failed",
+        details: walletCheckError.message
+      });
+    }
+
+    // Wallet belongs to another account
+    if (
+      existingWallet &&
+      String(existingWallet.telegram_id) !==
+        String(telegram_id)
+    ) {
+      return res.status(409).json({
+        error:
+          "This wallet is already connected to another account"
+      });
+    }
+
+    // Save wallet
+    const {
+      data: updatedUser,
       error: updateError
     } = await supabase
       .from("users")
       .update({
-
-        balance:
-          newBalance,
-
-        energy:
-          newEnergy,
-
-        last_energy_update:
-          energyData.lastEnergyUpdate
-
+        wallet_address: cleanAddress
       })
-      .eq(
-        "telegram_id",
-        telegram_id
-      )
+      .eq("telegram_id", telegram_id)
       .select()
       .single();
 
-
     if (updateError) {
-      throw updateError;
+      console.error(
+        "Wallet save error:",
+        updateError
+      );
+
+      return res.status(500).json({
+        error: "Failed to save wallet",
+        details: updateError.message
+      });
     }
 
-
     res.json({
-
       success: true,
-
-      balance:
-        Number(updated.balance),
-
-      energy:
-        Number(updated.energy),
-
-      max_energy:
-        Number(updated.max_energy),
-
-      accepted_taps:
-        acceptedTaps,
-
-      tap_power:
-        tapPower,
-
-      earned:
-        earned
-
+      wallet_address:
+        updatedUser.wallet_address
     });
 
-
   } catch (error) {
-
     console.error(
-      "TAP ERROR:",
+      "WALLET CONNECT ERROR:",
       error
     );
 
@@ -395,19 +300,13 @@ app.post("/api/tap", async (req, res) => {
   }
 });
 
+// ===============================
+// GET SAVED WALLET
+// ===============================
 
-/* =========================
-   DAILY BONUS
-========================= */
-
-app.post("/api/daily", async (req, res) => {
-
+app.post("/api/wallet/get", async (req, res) => {
   try {
-
-    const {
-      telegram_id
-    } = req.body;
-
+    const { telegram_id } = req.body;
 
     if (!telegram_id) {
       return res.status(400).json({
@@ -415,113 +314,41 @@ app.post("/api/daily", async (req, res) => {
       });
     }
 
-
     const {
       data: user,
       error
     } = await supabase
       .from("users")
-      .select("*")
+      .select("wallet_address")
       .eq("telegram_id", telegram_id)
-      .single();
+      .maybeSingle();
 
+    if (error) {
+      console.error(
+        "Get wallet error:",
+        error
+      );
 
-    if (
-      error ||
-      !user
-    ) {
+      return res.status(500).json({
+        error: "Failed to load wallet",
+        details: error.message
+      });
+    }
 
+    if (!user) {
       return res.status(404).json({
         error: "User not found"
       });
     }
 
-
-    const today =
-      new Date()
-        .toISOString()
-        .slice(0, 10);
-
-
-    if (user.last_daily_bonus) {
-
-      const lastBonus =
-        new Date(
-          user.last_daily_bonus
-        )
-          .toISOString()
-          .slice(0, 10);
-
-
-      if (
-        lastBonus === today
-      ) {
-
-        return res.status(400).json({
-
-          error:
-            "Daily bonus already claimed",
-
-          balance:
-            Number(user.balance)
-
-        });
-      }
-    }
-
-
-    const newBalance =
-      Number(user.balance) +
-      DAILY_BONUS;
-
-
-    const {
-      data: updated,
-      error: updateError
-    } = await supabase
-      .from("users")
-      .update({
-
-        balance:
-          newBalance,
-
-        last_daily_bonus:
-          new Date().toISOString()
-
-      })
-      .eq(
-        "telegram_id",
-        telegram_id
-      )
-      .select()
-      .single();
-
-
-    if (updateError) {
-      throw updateError;
-    }
-
-
     res.json({
-
-      success: true,
-
-      bonus:
-        DAILY_BONUS,
-
-      balance:
-        Number(updated.balance),
-
-      last_daily_bonus:
-        updated.last_daily_bonus
-
+      wallet_address:
+        user.wallet_address || null
     });
 
-
   } catch (error) {
-
     console.error(
-      "DAILY ERROR:",
+      "GET WALLET ERROR:",
       error
     );
 
@@ -531,19 +358,64 @@ app.post("/api/daily", async (req, res) => {
   }
 });
 
+// ===============================
+// DISCONNECT WALLET
+// ===============================
 
-/* =========================
-   SERVER
-========================= */
+app.post("/api/wallet/disconnect", async (req, res) => {
+  try {
+    const { telegram_id } = req.body;
+
+    if (!telegram_id) {
+      return res.status(400).json({
+        error: "telegram_id required"
+      });
+    }
+
+    const { error } = await supabase
+      .from("users")
+      .update({
+        wallet_address: null
+      })
+      .eq("telegram_id", telegram_id);
+
+    if (error) {
+      console.error(
+        "Wallet disconnect error:",
+        error
+      );
+
+      return res.status(500).json({
+        error: "Failed to disconnect wallet",
+        details: error.message
+      });
+    }
+
+    res.json({
+      success: true
+    });
+
+  } catch (error) {
+    console.error(
+      "DISCONNECT WALLET ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      error: "Server error"
+    });
+  }
+});
+
+// ===============================
+// START SERVER
+// ===============================
 
 const PORT =
   process.env.PORT || 3000;
 
-app.listen(
-  PORT,
-  () => {
-    console.log(
-      `SINAPS Backend running on port ${PORT}`
-    );
-  }
-);
+app.listen(PORT, () => {
+  console.log(
+    `SINAPS Backend running on port ${PORT}`
+  );
+});
