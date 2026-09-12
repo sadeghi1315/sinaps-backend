@@ -30,6 +30,8 @@ app.get("/", (req, res) => {
 
 app.post("/api/user", async (req, res) => {
   try {
+    console.log("USER REQUEST:", req.body);
+
     const { telegram_id, username } = req.body;
 
     if (!telegram_id) {
@@ -45,21 +47,19 @@ app.post("/api/user", async (req, res) => {
       .maybeSingle();
 
     if (error) {
-      console.error("User select error:", error);
+      console.error("USER SELECT ERROR:", error);
 
       return res.status(500).json({
-        error: "Failed to load user",
-        details: error.message
+        error: error.message
       });
     }
 
-    // Create user if not exists
     if (!user) {
       const { data: newUser, error: insertError } =
         await supabase
           .from("users")
           .insert({
-            telegram_id: telegram_id,
+            telegram_id,
             username: username || null,
             balance: 0,
             energy: 1000,
@@ -69,11 +69,13 @@ app.post("/api/user", async (req, res) => {
           .single();
 
       if (insertError) {
-        console.error("User insert error:", insertError);
+        console.error(
+          "USER INSERT ERROR:",
+          insertError
+        );
 
         return res.status(500).json({
-          error: "Failed to create user",
-          details: insertError.message
+          error: insertError.message
         });
       }
 
@@ -83,116 +85,10 @@ app.post("/api/user", async (req, res) => {
     res.json(user);
 
   } catch (error) {
-    console.error("USER API ERROR:", error);
+    console.error("USER ERROR:", error);
 
     res.status(500).json({
-      error: "Server error"
-    });
-  }
-});
-
-// ===============================
-// TAP
-// ===============================
-
-app.post("/api/tap", async (req, res) => {
-  try {
-    const {
-      telegram_id,
-      taps,
-      power
-    } = req.body;
-
-    if (!telegram_id) {
-      return res.status(400).json({
-        error: "telegram_id required"
-      });
-    }
-
-    const tapCount = Math.max(
-      1,
-      Math.min(Number(taps) || 1, 100)
-    );
-
-    const tapPower = Math.max(
-      1,
-      Number(power) || 1
-    );
-
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("telegram_id", telegram_id)
-      .maybeSingle();
-
-    if (error) {
-      console.error("Tap user error:", error);
-
-      return res.status(500).json({
-        error: "Failed to load user"
-      });
-    }
-
-    if (!user) {
-      return res.status(404).json({
-        error: "User not found"
-      });
-    }
-
-    const availableEnergy =
-      Number(user.energy) || 0;
-
-    const actualTaps = Math.min(
-      tapCount,
-      availableEnergy
-    );
-
-    if (actualTaps <= 0) {
-      return res.status(400).json({
-        error: "No energy",
-        balance: Number(user.balance) || 0,
-        energy: availableEnergy,
-        max_energy: Number(user.max_energy) || 1000
-      });
-    }
-
-    const earned =
-      actualTaps * tapPower;
-
-    const newBalance =
-      (Number(user.balance) || 0) + earned;
-
-    const newEnergy =
-      availableEnergy - actualTaps;
-
-    const { data: updated, error: updateError } =
-      await supabase
-        .from("users")
-        .update({
-          balance: newBalance,
-          energy: newEnergy,
-          last_energy_update: new Date().toISOString()
-        })
-        .eq("telegram_id", telegram_id)
-        .select()
-        .single();
-
-    if (updateError) {
-      console.error("Tap update error:", updateError);
-
-      return res.status(500).json({
-        error: "Failed to update balance",
-        details: updateError.message
-      });
-    }
-
-    res.json(updated);
-
-  } catch (error) {
-    console.error("TAP API ERROR:", error);
-
-    res.status(500).json({
-      error: "Server error"
+      error: error.message
     });
   }
 });
@@ -202,28 +98,98 @@ app.post("/api/tap", async (req, res) => {
 // ===============================
 
 app.post("/api/wallet/connect", async (req, res) => {
+
+  console.log("=================================");
+  console.log("WALLET CONNECT REQUEST");
+  console.log("BODY:", req.body);
+  console.log("=================================");
+
   try {
+
     const {
       telegram_id,
       wallet_address
     } = req.body;
 
-    if (!telegram_id || !wallet_address) {
+    if (!telegram_id) {
+
+      console.error(
+        "ERROR: telegram_id missing"
+      );
+
       return res.status(400).json({
-        error: "telegram_id and wallet_address required"
+        error: "telegram_id required"
+      });
+    }
+
+    if (!wallet_address) {
+
+      console.error(
+        "ERROR: wallet_address missing"
+      );
+
+      return res.status(400).json({
+        error: "wallet_address required"
       });
     }
 
     const cleanAddress =
       String(wallet_address).trim();
 
-    if (cleanAddress.length < 20) {
-      return res.status(400).json({
-        error: "Invalid wallet address"
+    console.log(
+      "Telegram ID:",
+      telegram_id
+    );
+
+    console.log(
+      "Wallet:",
+      cleanAddress
+    );
+
+    // Check user
+    const {
+      data: user,
+      error: userError
+    } = await supabase
+      .from("users")
+      .select("id, telegram_id, wallet_address")
+      .eq("telegram_id", telegram_id)
+      .maybeSingle();
+
+    if (userError) {
+
+      console.error(
+        "USER CHECK ERROR:",
+        userError
+      );
+
+      return res.status(500).json({
+        error:
+          "User check failed",
+        details:
+          userError.message
       });
     }
 
-    // Check if wallet is already connected
+    if (!user) {
+
+      console.error(
+        "USER NOT FOUND:",
+        telegram_id
+      );
+
+      return res.status(404).json({
+        error:
+          "Telegram user not found"
+      });
+    }
+
+    console.log(
+      "USER FOUND:",
+      user
+    );
+
+    // Check duplicate wallet
     const {
       data: existingWallet,
       error: walletCheckError
@@ -234,30 +200,37 @@ app.post("/api/wallet/connect", async (req, res) => {
       .maybeSingle();
 
     if (walletCheckError) {
+
       console.error(
-        "Wallet check error:",
+        "WALLET CHECK ERROR:",
         walletCheckError
       );
 
       return res.status(500).json({
-        error: "Wallet check failed",
-        details: walletCheckError.message
+        error:
+          "Wallet check failed",
+        details:
+          walletCheckError.message
       });
     }
 
-    // Wallet belongs to another account
     if (
       existingWallet &&
       String(existingWallet.telegram_id) !==
         String(telegram_id)
     ) {
+
+      console.error(
+        "WALLET ALREADY USED"
+      );
+
       return res.status(409).json({
         error:
           "This wallet is already connected to another account"
       });
     }
 
-    // Save wallet
+    // SAVE WALLET
     const {
       data: updatedUser,
       error: updateError
@@ -267,20 +240,28 @@ app.post("/api/wallet/connect", async (req, res) => {
         wallet_address: cleanAddress
       })
       .eq("telegram_id", telegram_id)
-      .select()
+      .select("telegram_id, wallet_address")
       .single();
 
     if (updateError) {
+
       console.error(
-        "Wallet save error:",
+        "WALLET UPDATE ERROR:",
         updateError
       );
 
       return res.status(500).json({
-        error: "Failed to save wallet",
-        details: updateError.message
+        error:
+          "Wallet update failed",
+        details:
+          updateError.message
       });
     }
+
+    console.log(
+      "WALLET SAVED SUCCESSFULLY:",
+      updatedUser
+    );
 
     res.json({
       success: true,
@@ -289,28 +270,40 @@ app.post("/api/wallet/connect", async (req, res) => {
     });
 
   } catch (error) {
+
     console.error(
-      "WALLET CONNECT ERROR:",
+      "WALLET CONNECT CRITICAL ERROR:",
       error
     );
 
     res.status(500).json({
-      error: "Server error"
+      error:
+        "Server error",
+      details:
+        error.message
     });
   }
 });
 
 // ===============================
-// GET SAVED WALLET
+// GET WALLET
 // ===============================
 
 app.post("/api/wallet/get", async (req, res) => {
+
+  console.log(
+    "GET WALLET REQUEST:",
+    req.body
+  );
+
   try {
+
     const { telegram_id } = req.body;
 
     if (!telegram_id) {
       return res.status(400).json({
-        error: "telegram_id required"
+        error:
+          "telegram_id required"
       });
     }
 
@@ -324,20 +317,22 @@ app.post("/api/wallet/get", async (req, res) => {
       .maybeSingle();
 
     if (error) {
+
       console.error(
-        "Get wallet error:",
+        "GET WALLET ERROR:",
         error
       );
 
       return res.status(500).json({
-        error: "Failed to load wallet",
-        details: error.message
+        error: error.message
       });
     }
 
     if (!user) {
+
       return res.status(404).json({
-        error: "User not found"
+        error:
+          "User not found"
       });
     }
 
@@ -347,75 +342,241 @@ app.post("/api/wallet/get", async (req, res) => {
     });
 
   } catch (error) {
+
     console.error(
-      "GET WALLET ERROR:",
+      "GET WALLET CRITICAL ERROR:",
       error
     );
 
     res.status(500).json({
-      error: "Server error"
+      error: error.message
     });
   }
 });
 
 // ===============================
-// DISCONNECT WALLET
+// DISCONNECT
 // ===============================
 
-app.post("/api/wallet/disconnect", async (req, res) => {
-  try {
-    const { telegram_id } = req.body;
+app.post(
+  "/api/wallet/disconnect",
+  async (req, res) => {
 
-    if (!telegram_id) {
-      return res.status(400).json({
-        error: "telegram_id required"
+    console.log(
+      "DISCONNECT REQUEST:",
+      req.body
+    );
+
+    try {
+
+      const { telegram_id } = req.body;
+
+      if (!telegram_id) {
+
+        return res.status(400).json({
+          error:
+            "telegram_id required"
+        });
+      }
+
+      const { error } =
+        await supabase
+          .from("users")
+          .update({
+            wallet_address: null
+          })
+          .eq(
+            "telegram_id",
+            telegram_id
+          );
+
+      if (error) {
+
+        console.error(
+          "DISCONNECT ERROR:",
+          error
+        );
+
+        return res.status(500).json({
+          error:
+            error.message
+        });
+      }
+
+      res.json({
+        success: true
       });
-    }
 
-    const { error } = await supabase
-      .from("users")
-      .update({
-        wallet_address: null
-      })
-      .eq("telegram_id", telegram_id);
+    } catch (error) {
 
-    if (error) {
       console.error(
-        "Wallet disconnect error:",
+        "DISCONNECT CRITICAL ERROR:",
         error
       );
 
-      return res.status(500).json({
-        error: "Failed to disconnect wallet",
-        details: error.message
+      res.status(500).json({
+        error:
+          error.message
+      });
+    }
+  }
+);
+
+// ===============================
+// TAP
+// ===============================
+
+app.post("/api/tap", async (req, res) => {
+
+  try {
+
+    const {
+      telegram_id,
+      taps,
+      power
+    } = req.body;
+
+    if (!telegram_id) {
+      return res.status(400).json({
+        error:
+          "telegram_id required"
       });
     }
 
-    res.json({
-      success: true
-    });
+    const tapCount = Math.max(
+      1,
+      Math.min(
+        Number(taps) || 1,
+        100
+      )
+    );
+
+    const tapPower = Math.max(
+      1,
+      Number(power) || 1
+    );
+
+    const {
+      data: user,
+      error
+    } = await supabase
+      .from("users")
+      .select("*")
+      .eq(
+        "telegram_id",
+        telegram_id
+      )
+      .maybeSingle();
+
+    if (error || !user) {
+
+      return res.status(404).json({
+        error:
+          "User not found"
+      });
+    }
+
+    const availableEnergy =
+      Number(user.energy) || 0;
+
+    const actualTaps =
+      Math.min(
+        tapCount,
+        availableEnergy
+      );
+
+    if (actualTaps <= 0) {
+
+      return res.status(400).json({
+        error:
+          "No energy"
+      });
+    }
+
+    const earned =
+      actualTaps * tapPower;
+
+    const newBalance =
+      Number(user.balance || 0) +
+      earned;
+
+    const newEnergy =
+      availableEnergy -
+      actualTaps;
+
+    const {
+      data: updated,
+      error: updateError
+    } = await supabase
+      .from("users")
+      .update({
+        balance:
+          newBalance,
+
+        energy:
+          newEnergy,
+
+        last_energy_update:
+          new Date().toISOString()
+      })
+      .eq(
+        "telegram_id",
+        telegram_id
+      )
+      .select()
+      .single();
+
+    if (updateError) {
+
+      console.error(
+        "TAP UPDATE ERROR:",
+        updateError
+      );
+
+      return res.status(500).json({
+        error:
+          updateError.message
+      });
+    }
+
+    res.json(updated);
 
   } catch (error) {
+
     console.error(
-      "DISCONNECT WALLET ERROR:",
+      "TAP ERROR:",
       error
     );
 
     res.status(500).json({
-      error: "Server error"
+      error:
+        error.message
     });
   }
 });
 
 // ===============================
-// START SERVER
+// SERVER
 // ===============================
 
 const PORT =
   process.env.PORT || 3000;
 
 app.listen(PORT, () => {
+
+  console.log(
+    "================================="
+  );
+
   console.log(
     `SINAPS Backend running on port ${PORT}`
+  );
+
+  console.log(
+    "Wallet API: READY"
+  );
+
+  console.log(
+    "================================="
   );
 });
