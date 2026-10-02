@@ -8,6 +8,6 @@
   "dependencies": {
     "express": "^5.1.0",
     "cors": "^2.8.5",
-    "@supabase/supabase-js": "^2.57.0"
+    "@libsql/client": "^0.15.15"
   }
 }
