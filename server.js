@@ -23,7 +23,10 @@ const SNP_CONTRACT =
 const WITHDRAW_FEE_NANO = "100000000";
 
 if (!TURSO_DATABASE_URL || !TURSO_AUTH_TOKEN) {
-  console.error("Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN");
+  console.error(
+    "Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN"
+  );
+
   process.exit(1);
 }
 
@@ -124,6 +127,93 @@ function nowISO() {
 }
 
 /* =========================================================
+   ENERGY REGEN
+========================================================= */
+
+/*
+ * هر 3 ثانیه:
+ * +1 Energy
+ *
+ * حداکثر:
+ * max_energy
+ */
+
+async function regenerateEnergy(telegramId) {
+  await db.execute({
+    sql: `
+      UPDATE users
+      SET
+        energy =
+          MIN(
+            max_energy,
+            energy +
+            CAST(
+              (
+                strftime('%s', 'now') -
+                strftime(
+                  '%s',
+                  COALESCE(
+                    last_energy_update,
+                    created_at
+                  )
+                )
+              ) / 3
+              AS INTEGER
+            )
+          ),
+
+        last_energy_update =
+          CASE
+            WHEN
+              energy +
+              CAST(
+                (
+                  strftime('%s', 'now') -
+                  strftime(
+                    '%s',
+                    COALESCE(
+                      last_energy_update,
+                      created_at
+                    )
+                  )
+                ) / 3
+                AS INTEGER
+              ) >= max_energy
+
+            THEN datetime('now')
+
+            ELSE datetime(
+              COALESCE(
+                last_energy_update,
+                created_at
+              ),
+              '+' ||
+              (
+                CAST(
+                  (
+                    strftime('%s', 'now') -
+                    strftime(
+                      '%s',
+                      COALESCE(
+                        last_energy_update,
+                        created_at
+                      )
+                    )
+                  ) / 3
+                  AS INTEGER
+                ) * 3
+              ) ||
+              ' seconds'
+            )
+          END
+
+      WHERE telegram_id = ?
+    `,
+    args: [telegramId]
+  });
+}
+
+/* =========================================================
    HEALTH
 ========================================================= */
 
@@ -142,8 +232,15 @@ app.get("/", async (req, res) => {
 
 app.post("/api/user", async (req, res) => {
   try {
-    const telegramId = normalizeTelegramId(req.body.telegram_id);
-    const username = String(req.body.username || "");
+    const telegramId =
+      normalizeTelegramId(
+        req.body.telegram_id
+      );
+
+    const username =
+      String(
+        req.body.username || ""
+      );
 
     if (!telegramId) {
       return res.status(400).json({
@@ -160,6 +257,10 @@ app.post("/api/user", async (req, res) => {
       `,
       args: [telegramId]
     });
+
+    /* -----------------------------------------------------
+       CREATE USER
+    ----------------------------------------------------- */
 
     if (result.rows.length === 0) {
       const now = nowISO();
@@ -185,16 +286,37 @@ app.post("/api/user", async (req, res) => {
           now
         ]
       });
-    } else if (username) {
+    }
+
+    /* -----------------------------------------------------
+       UPDATE USERNAME
+    ----------------------------------------------------- */
+
+    if (username) {
       await db.execute({
         sql: `
           UPDATE users
           SET username = ?
           WHERE telegram_id = ?
         `,
-        args: [username, telegramId]
+        args: [
+          username,
+          telegramId
+        ]
       });
     }
+
+    /* -----------------------------------------------------
+       ENERGY REGEN
+    ----------------------------------------------------- */
+
+    await regenerateEnergy(
+      telegramId
+    );
+
+    /* -----------------------------------------------------
+       RETURN USER
+    ----------------------------------------------------- */
 
     result = await db.execute({
       sql: `
@@ -212,7 +334,10 @@ app.post("/api/user", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("USER ERROR:", error);
+    console.error(
+      "USER ERROR:",
+      error
+    );
 
     return res.status(500).json({
       error: "User request failed"
@@ -224,487 +349,801 @@ app.post("/api/user", async (req, res) => {
    WALLET CONNECT
 ========================================================= */
 
-app.post("/api/wallet/connect", async (req, res) => {
-  try {
-    const telegramId = normalizeTelegramId(req.body.telegram_id);
-    const walletAddress = String(req.body.wallet_address || "").trim();
+app.post(
+  "/api/wallet/connect",
+  async (req, res) => {
 
-    if (!telegramId || !walletAddress) {
-      return res.status(400).json({
-        error: "telegram_id and wallet_address are required"
+    try {
+
+      const telegramId =
+        normalizeTelegramId(
+          req.body.telegram_id
+        );
+
+      const walletAddress =
+        String(
+          req.body.wallet_address || ""
+        ).trim();
+
+      if (
+        !telegramId ||
+        !walletAddress
+      ) {
+        return res.status(400).json({
+          error:
+            "telegram_id and wallet_address are required"
+        });
+      }
+
+      const result =
+        await db.execute({
+          sql: `
+            UPDATE users
+            SET wallet_address = ?
+            WHERE telegram_id = ?
+          `,
+          args: [
+            walletAddress,
+            telegramId
+          ]
+        });
+
+      if (
+        result.rowsAffected === 0
+      ) {
+        return res.status(404).json({
+          error:
+            "User not found"
+        });
+      }
+
+      return res.json({
+        ok: true,
+        wallet_address:
+          walletAddress
+      });
+
+    } catch (error) {
+
+      console.error(
+        "WALLET CONNECT ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Wallet save failed"
       });
     }
-
-    const result = await db.execute({
-      sql: `
-        UPDATE users
-        SET wallet_address = ?
-        WHERE telegram_id = ?
-      `,
-      args: [
-        walletAddress,
-        telegramId
-      ]
-    });
-
-    if (result.rowsAffected === 0) {
-      return res.status(404).json({
-        error: "User not found"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      wallet_address: walletAddress
-    });
-
-  } catch (error) {
-    console.error("WALLET CONNECT ERROR:", error);
-
-    return res.status(500).json({
-      error: "Wallet save failed"
-    });
   }
-});
+);
 
 /* =========================================================
    WALLET GET
 ========================================================= */
 
-app.post("/api/wallet/get", async (req, res) => {
-  try {
-    const telegramId = normalizeTelegramId(req.body.telegram_id);
+app.post(
+  "/api/wallet/get",
+  async (req, res) => {
 
-    if (!telegramId) {
-      return res.status(400).json({
-        error: "Invalid telegram_id"
+    try {
+
+      const telegramId =
+        normalizeTelegramId(
+          req.body.telegram_id
+        );
+
+      if (!telegramId) {
+        return res.status(400).json({
+          error:
+            "Invalid telegram_id"
+        });
+      }
+
+      const result =
+        await db.execute({
+          sql: `
+            SELECT wallet_address
+            FROM users
+            WHERE telegram_id = ?
+            LIMIT 1
+          `,
+          args: [
+            telegramId
+          ]
+        });
+
+      if (
+        result.rows.length === 0
+      ) {
+        return res.status(404).json({
+          error:
+            "User not found"
+        });
+      }
+
+      return res.json({
+        ok: true,
+        wallet_address:
+          result.rows[0]
+            .wallet_address || null
+      });
+
+    } catch (error) {
+
+      console.error(
+        "WALLET GET ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Wallet lookup failed"
       });
     }
-
-    const result = await db.execute({
-      sql: `
-        SELECT wallet_address
-        FROM users
-        WHERE telegram_id = ?
-        LIMIT 1
-      `,
-      args: [telegramId]
-    });
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: "User not found"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      wallet_address: result.rows[0].wallet_address || null
-    });
-
-  } catch (error) {
-    console.error("WALLET GET ERROR:", error);
-
-    return res.status(500).json({
-      error: "Wallet lookup failed"
-    });
   }
-});
+);
 
 /* =========================================================
    WALLET DISCONNECT
 ========================================================= */
 
-app.post("/api/wallet/disconnect", async (req, res) => {
-  try {
-    const telegramId = normalizeTelegramId(req.body.telegram_id);
+app.post(
+  "/api/wallet/disconnect",
+  async (req, res) => {
 
-    if (!telegramId) {
-      return res.status(400).json({
-        error: "Invalid telegram_id"
+    try {
+
+      const telegramId =
+        normalizeTelegramId(
+          req.body.telegram_id
+        );
+
+      if (!telegramId) {
+        return res.status(400).json({
+          error:
+            "Invalid telegram_id"
+        });
+      }
+
+      await db.execute({
+        sql: `
+          UPDATE users
+          SET wallet_address = NULL
+          WHERE telegram_id = ?
+        `,
+        args: [
+          telegramId
+        ]
+      });
+
+      return res.json({
+        ok: true
+      });
+
+    } catch (error) {
+
+      console.error(
+        "WALLET DISCONNECT ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Wallet disconnect failed"
       });
     }
-
-    await db.execute({
-      sql: `
-        UPDATE users
-        SET wallet_address = NULL
-        WHERE telegram_id = ?
-      `,
-      args: [telegramId]
-    });
-
-    return res.json({
-      ok: true
-    });
-
-  } catch (error) {
-    console.error("WALLET DISCONNECT ERROR:", error);
-
-    return res.status(500).json({
-      error: "Wallet disconnect failed"
-    });
   }
-});
+);
 
 /* =========================================================
    TAP
 ========================================================= */
 
-app.post("/api/tap", async (req, res) => {
-  try {
-    const telegramId = normalizeTelegramId(req.body.telegram_id);
+/*
+ * بسیار مهم:
+ *
+ * موجودی با:
+ *
+ *     balance = balance + 1
+ *
+ * تغییر می‌کند.
+ *
+ * نه اینکه مقدار قدیمی را بخوانیم،
+ * +1 کنیم،
+ * و دوباره مقدار را بنویسیم.
+ *
+ * این روش برای Tapهای سریع بسیار امن‌تر است.
+ */
 
-    if (!telegramId) {
-      return res.status(400).json({
-        error: "Invalid telegram_id"
-      });
-    }
+app.post(
+  "/api/tap",
+  async (req, res) => {
 
-    const result = await db.execute({
-      sql: `
-        SELECT *
-        FROM users
-        WHERE telegram_id = ?
-        LIMIT 1
-      `,
-      args: [telegramId]
-    });
+    try {
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: "User not found"
-      });
-    }
+      const telegramId =
+        normalizeTelegramId(
+          req.body.telegram_id
+        );
 
-    const user = result.rows[0];
+      if (!telegramId) {
 
-    const currentEnergy = Number(user.energy || 0);
-    const currentBalance = Number(user.balance || 0);
+        return res.status(400).json({
+          error:
+            "Invalid telegram_id"
+        });
+      }
 
-    if (currentEnergy <= 0) {
-      return res.status(400).json({
-        error: "Not enough energy",
-        user
-      });
-    }
+      /* ---------------------------------------------------
+         USER CHECK
+      --------------------------------------------------- */
 
-    const newBalance = currentBalance + 1;
-    const newEnergy = currentEnergy - 1;
+      let result =
+        await db.execute({
+          sql: `
+            SELECT *
+            FROM users
+            WHERE telegram_id = ?
+            LIMIT 1
+          `,
+          args: [
+            telegramId
+          ]
+        });
 
-    await db.execute({
-      sql: `
-        UPDATE users
-        SET balance = ?,
-            energy = ?
-        WHERE telegram_id = ?
-      `,
-      args: [
-        newBalance,
-        newEnergy,
+      if (
+        result.rows.length === 0
+      ) {
+
+        return res.status(404).json({
+          error:
+            "User not found"
+        });
+      }
+
+      /* ---------------------------------------------------
+         ENERGY REGEN
+      --------------------------------------------------- */
+
+      await regenerateEnergy(
         telegramId
-      ]
-    });
+      );
 
-    const updated = await db.execute({
-      sql: `
-        SELECT *
-        FROM users
-        WHERE telegram_id = ?
-        LIMIT 1
-      `,
-      args: [telegramId]
-    });
+      /* ---------------------------------------------------
+         ATOMIC TAP
+      ---------------------------------------------------
 
-    return res.json({
-      ok: true,
-      user: updated.rows[0]
-    });
+         این قسمت مهم‌ترین تغییر است.
 
-  } catch (error) {
-    console.error("TAP ERROR:", error);
+         اگر 20 Tap همزمان برسد:
 
-    return res.status(500).json({
-      error: "Tap failed"
-    });
+         balance = balance + 1
+
+         هر درخواست روی مقدار فعلی
+         دیتابیس اعمال می‌شود.
+
+      --------------------------------------------------- */
+
+      const updateResult =
+        await db.execute({
+          sql: `
+            UPDATE users
+
+            SET
+              balance = balance + 1,
+              energy = energy - 1
+
+            WHERE
+              telegram_id = ?
+              AND energy > 0
+          `,
+          args: [
+            telegramId
+          ]
+        });
+
+      /* ---------------------------------------------------
+         NO ENERGY
+      --------------------------------------------------- */
+
+      if (
+        updateResult.rowsAffected === 0
+      ) {
+
+        const current =
+          await db.execute({
+            sql: `
+              SELECT *
+              FROM users
+              WHERE telegram_id = ?
+              LIMIT 1
+            `,
+            args: [
+              telegramId
+            ]
+          });
+
+        return res.status(400).json({
+          error:
+            "Not enough energy",
+
+          user:
+            current.rows[0]
+        });
+      }
+
+      /* ---------------------------------------------------
+         GET FINAL USER
+      --------------------------------------------------- */
+
+      result =
+        await db.execute({
+          sql: `
+            SELECT *
+            FROM users
+            WHERE telegram_id = ?
+            LIMIT 1
+          `,
+          args: [
+            telegramId
+          ]
+        });
+
+      return res.json({
+        ok: true,
+        user:
+          result.rows[0]
+      });
+
+    } catch (error) {
+
+      console.error(
+        "TAP ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Tap failed"
+      });
+    }
   }
-});
+);
 
 /* =========================================================
    CREATE WITHDRAWAL
 ========================================================= */
 
-app.post("/api/withdraw/create", async (req, res) => {
-  try {
-    const telegramId = normalizeTelegramId(req.body.telegram_id);
-    const walletAddress = String(req.body.wallet_address || "").trim();
-    const amount = normalizeAmount(req.body.amount);
+app.post(
+  "/api/withdraw/create",
+  async (req, res) => {
 
-    if (!telegramId || !walletAddress || !amount) {
-      return res.status(400).json({
-        error: "Invalid withdrawal data"
-      });
-    }
+    try {
 
-    const userResult = await db.execute({
-      sql: `
-        SELECT *
-        FROM users
-        WHERE telegram_id = ?
-        LIMIT 1
-      `,
-      args: [telegramId]
-    });
+      const telegramId =
+        normalizeTelegramId(
+          req.body.telegram_id
+        );
 
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({
-        error: "User not found"
-      });
-    }
+      const walletAddress =
+        String(
+          req.body.wallet_address || ""
+        ).trim();
 
-    const user = userResult.rows[0];
+      const amount =
+        normalizeAmount(
+          req.body.amount
+        );
 
-    if (
-      user.wallet_address &&
-      user.wallet_address !== walletAddress
-    ) {
-      return res.status(400).json({
-        error: "Wallet does not match saved wallet"
-      });
-    }
+      if (
+        !telegramId ||
+        !walletAddress ||
+        !amount
+      ) {
 
-    const balance = Number(user.balance || 0);
+        return res.status(400).json({
+          error:
+            "Invalid withdrawal data"
+        });
+      }
 
-    if (amount > balance) {
-      return res.status(400).json({
-        error: "Insufficient SNP balance"
-      });
-    }
+      const userResult =
+        await db.execute({
+          sql: `
+            SELECT *
+            FROM users
+            WHERE telegram_id = ?
+            LIMIT 1
+          `,
+          args: [
+            telegramId
+          ]
+        });
 
-    const pending = await db.execute({
-      sql: `
-        SELECT withdrawal_id
-        FROM withdrawals
-        WHERE telegram_id = ?
-        AND status IN (
-          'created',
-          'payment_pending',
-          'verified',
-          'processing'
-        )
-        LIMIT 1
-      `,
-      args: [telegramId]
-    });
+      if (
+        userResult.rows.length === 0
+      ) {
 
-    if (pending.rows.length > 0) {
-      return res.status(400).json({
-        error: "There is already a pending withdrawal",
-        withdrawal_id: pending.rows[0].withdrawal_id
-      });
-    }
+        return res.status(404).json({
+          error:
+            "User not found"
+        });
+      }
 
-    const withdrawalId =
-      "SNP-" +
-      Date.now().toString(36).toUpperCase() +
-      "-" +
-      crypto.randomBytes(4).toString("hex").toUpperCase();
+      const user =
+        userResult.rows[0];
 
-    await db.execute({
-      sql: `
-        INSERT INTO withdrawals
-        (
-          withdrawal_id,
-          telegram_id,
-          wallet_address,
+      if (
+        user.wallet_address &&
+        user.wallet_address !==
+          walletAddress
+      ) {
+
+        return res.status(400).json({
+          error:
+            "Wallet does not match saved wallet"
+        });
+      }
+
+      const balance =
+        Number(
+          user.balance || 0
+        );
+
+      if (amount > balance) {
+
+        return res.status(400).json({
+          error:
+            "Insufficient SNP balance"
+        });
+      }
+
+      const pending =
+        await db.execute({
+          sql: `
+            SELECT withdrawal_id
+            FROM withdrawals
+            WHERE telegram_id = ?
+            AND status IN (
+              'created',
+              'payment_pending',
+              'verified',
+              'processing'
+            )
+            LIMIT 1
+          `,
+          args: [
+            telegramId
+          ]
+        });
+
+      if (
+        pending.rows.length > 0
+      ) {
+
+        return res.status(400).json({
+          error:
+            "There is already a pending withdrawal",
+
+          withdrawal_id:
+            pending.rows[0]
+              .withdrawal_id
+        });
+      }
+
+      const withdrawalId =
+        "SNP-" +
+        Date.now()
+          .toString(36)
+          .toUpperCase() +
+        "-" +
+        crypto
+          .randomBytes(4)
+          .toString("hex")
+          .toUpperCase();
+
+      await db.execute({
+        sql: `
+          INSERT INTO withdrawals
+          (
+            withdrawal_id,
+            telegram_id,
+            wallet_address,
+            amount,
+            fee_ton,
+            fee_nano,
+            treasury_wallet,
+            token_contract,
+            status
+          )
+
+          VALUES (
+            ?,
+            ?,
+            ?,
+            ?,
+            0.1,
+            ?,
+            ?,
+            ?,
+            'payment_pending'
+          )
+        `,
+        args: [
+          withdrawalId,
+          telegramId,
+          walletAddress,
           amount,
-          fee_ton,
-          fee_nano,
-          treasury_wallet,
-          token_contract,
-          status
-        )
-        VALUES (?, ?, ?, ?, 0.1, ?, ?, ?, 'payment_pending')
-      `,
-      args: [
-        withdrawalId,
-        telegramId,
-        walletAddress,
-        amount,
-        WITHDRAW_FEE_NANO,
-        TREASURY_WALLET,
-        SNP_CONTRACT
-      ]
-    });
+          WITHDRAW_FEE_NANO,
+          TREASURY_WALLET,
+          SNP_CONTRACT
+        ]
+      });
 
-    return res.json({
-      ok: true,
-      withdrawal_id: withdrawalId,
-      amount,
-      fee_ton: 0.1,
-      fee_nano: WITHDRAW_FEE_NANO,
-      treasury_wallet: TREASURY_WALLET,
-      token_contract: SNP_CONTRACT,
-      status: "payment_pending"
-    });
+      return res.json({
+        ok: true,
 
-  } catch (error) {
-    console.error("WITHDRAW CREATE ERROR:", error);
+        withdrawal_id:
+          withdrawalId,
 
-    return res.status(500).json({
-      error: "Withdrawal creation failed"
-    });
+        amount:
+          amount,
+
+        fee_ton:
+          0.1,
+
+        fee_nano:
+          WITHDRAW_FEE_NANO,
+
+        treasury_wallet:
+          TREASURY_WALLET,
+
+        token_contract:
+          SNP_CONTRACT,
+
+        status:
+          "payment_pending"
+      });
+
+    } catch (error) {
+
+      console.error(
+        "WITHDRAW CREATE ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Withdrawal creation failed"
+      });
+    }
   }
-});
+);
 
 /* =========================================================
    WITHDRAW STATUS
 ========================================================= */
 
-app.get("/api/withdraw/status/:withdrawalId", async (req, res) => {
-  try {
-    const withdrawalId = String(
-      req.params.withdrawalId || ""
-    ).trim();
+app.get(
+  "/api/withdraw/status/:withdrawalId",
+  async (req, res) => {
 
-    if (!withdrawalId) {
-      return res.status(400).json({
-        error: "Invalid withdrawal ID"
+    try {
+
+      const withdrawalId =
+        String(
+          req.params.withdrawalId || ""
+        ).trim();
+
+      if (!withdrawalId) {
+
+        return res.status(400).json({
+          error:
+            "Invalid withdrawal ID"
+        });
+      }
+
+      const result =
+        await db.execute({
+          sql: `
+            SELECT *
+            FROM withdrawals
+            WHERE withdrawal_id = ?
+            LIMIT 1
+          `,
+          args: [
+            withdrawalId
+          ]
+        });
+
+      if (
+        result.rows.length === 0
+      ) {
+
+        return res.status(404).json({
+          error:
+            "Withdrawal not found"
+        });
+      }
+
+      return res.json({
+        ok: true,
+
+        withdrawal:
+          result.rows[0]
+      });
+
+    } catch (error) {
+
+      console.error(
+        "WITHDRAW STATUS ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Withdrawal status failed"
       });
     }
-
-    const result = await db.execute({
-      sql: `
-        SELECT *
-        FROM withdrawals
-        WHERE withdrawal_id = ?
-        LIMIT 1
-      `,
-      args: [withdrawalId]
-    });
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: "Withdrawal not found"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      withdrawal: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error("WITHDRAW STATUS ERROR:", error);
-
-    return res.status(500).json({
-      error: "Withdrawal status failed"
-    });
   }
-});
+);
 
 /* =========================================================
    VERIFY WITHDRAWAL
 ========================================================= */
 
-/*
-  مرحله فعلی فقط برداشت را ثبت می‌کند.
-  انتقال واقعی SNP از Treasury در مرحله بعد اضافه می‌شود.
+app.post(
+  "/api/withdraw/verify",
+  async (req, res) => {
 
-  فعلاً verify فقط وضعیت درخواست را بررسی می‌کند.
-*/
+    try {
 
-app.post("/api/withdraw/verify", async (req, res) => {
-  try {
-    const telegramId = normalizeTelegramId(req.body.telegram_id);
-    const withdrawalId = String(
-      req.body.withdrawal_id || ""
-    ).trim();
+      const telegramId =
+        normalizeTelegramId(
+          req.body.telegram_id
+        );
 
-    const walletAddress = String(
-      req.body.wallet_address || ""
-    ).trim();
+      const withdrawalId =
+        String(
+          req.body.withdrawal_id || ""
+        ).trim();
 
-    if (!telegramId || !withdrawalId || !walletAddress) {
-      return res.status(400).json({
-        error: "Invalid verification data"
-      });
-    }
+      const walletAddress =
+        String(
+          req.body.wallet_address || ""
+        ).trim();
 
-    const result = await db.execute({
-      sql: `
-        SELECT *
-        FROM withdrawals
-        WHERE withdrawal_id = ?
-        LIMIT 1
-      `,
-      args: [withdrawalId]
-    });
+      if (
+        !telegramId ||
+        !withdrawalId ||
+        !walletAddress
+      ) {
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        error: "Withdrawal not found"
-      });
-    }
+        return res.status(400).json({
+          error:
+            "Invalid verification data"
+        });
+      }
 
-    const withdrawal = result.rows[0];
+      const result =
+        await db.execute({
+          sql: `
+            SELECT *
+            FROM withdrawals
+            WHERE withdrawal_id = ?
+            LIMIT 1
+          `,
+          args: [
+            withdrawalId
+          ]
+        });
 
-    if (Number(withdrawal.telegram_id) !== telegramId) {
-      return res.status(403).json({
-        error: "Telegram user mismatch"
-      });
-    }
+      if (
+        result.rows.length === 0
+      ) {
 
-    if (withdrawal.wallet_address !== walletAddress) {
-      return res.status(403).json({
-        error: "Wallet mismatch"
-      });
-    }
+        return res.status(404).json({
+          error:
+            "Withdrawal not found"
+        });
+      }
 
-    if (withdrawal.status === "completed") {
+      const withdrawal =
+        result.rows[0];
+
+      if (
+        Number(
+          withdrawal.telegram_id
+        ) !== telegramId
+      ) {
+
+        return res.status(403).json({
+          error:
+            "Telegram user mismatch"
+        });
+      }
+
+      if (
+        withdrawal.wallet_address !==
+        walletAddress
+      ) {
+
+        return res.status(403).json({
+          error:
+            "Wallet mismatch"
+        });
+      }
+
+      if (
+        withdrawal.status ===
+        "completed"
+      ) {
+
+        return res.json({
+          ok: true,
+
+          status:
+            "completed",
+
+          withdrawal:
+            withdrawal
+        });
+      }
+
       return res.json({
         ok: true,
-        status: "completed",
-        withdrawal
+
+        status:
+          withdrawal.status,
+
+        withdrawal:
+          withdrawal
+      });
+
+    } catch (error) {
+
+      console.error(
+        "WITHDRAW VERIFY ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Withdrawal verification failed"
       });
     }
-
-    /*
-      هنوز پرداخت TON روی زنجیره تأیید نشده است.
-      این مرحله عمداً فقط وضعیت را نگه می‌دارد.
-    */
-
-    return res.json({
-      ok: true,
-      status: withdrawal.status,
-      withdrawal
-    });
-
-  } catch (error) {
-    console.error("WITHDRAW VERIFY ERROR:", error);
-
-    return res.status(500).json({
-      error: "Withdrawal verification failed"
-    });
   }
-});
+);
 
 /* =========================================================
-   START
+   START SERVER
 ========================================================= */
 
 async function start() {
+
   try {
+
     await initDatabase();
 
-    app.listen(PORT, () => {
-      console.log(
-        `SINAPS backend running on port ${PORT}`
-      );
-    });
+    app.listen(
+      PORT,
+      () => {
+
+        console.log(
+          `SINAPS backend running on port ${PORT}`
+        );
+
+      }
+    );
 
   } catch (error) {
-    console.error("STARTUP ERROR:", error);
+
+    console.error(
+      "STARTUP ERROR:",
+      error
+    );
+
     process.exit(1);
   }
 }
