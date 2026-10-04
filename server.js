@@ -161,12 +161,161 @@ async function rewardReferralOwner(telegramId, rewardAmount, source) {
 }
 
 async function qualifyReferral(telegramId) {
-  const user = await getUser(telegramId);
-  if (!user?.referred_by || !user?.wallet_address || Number(user.referral_rewarded || 0) === 1) return 0;
-  const changed = await db.execute({
-    sql: `UPDATE users SET referral_rewarded=1 WHERE telegram_id=? AND referred_by IS NOT NULL AND wallet_address IS NOT NULL AND referral_rewarded=0`,
-    args: [String(telegramId)]
-  });
+  try {
+    const userResult = await db.execute({
+      sql: `
+        SELECT
+          telegram_id,
+          referred_by,
+          wallet_address,
+          referral_rewarded
+        FROM users
+        WHERE telegram_id = ?
+        LIMIT 1
+      `,
+      args: [String(telegramId)]
+    });
+
+    if (!userResult.rows.length) {
+      return 0;
+    }
+
+    const user = userResult.rows[0];
+
+    // شرایط فعال شدن Referral:
+    // 1. کاربر زیرمجموعه باشد
+    // 2. کیف پول خودش را وصل کرده باشد
+    // 3. قبلاً پاداش نگرفته باشد
+    if (
+      !user.referred_by ||
+      !user.wallet_address ||
+      Number(user.referral_rewarded || 0) === 1
+    ) {
+      return 0;
+    }
+
+    // جلوگیری از Referral به خودش
+    if (String(user.referred_by) === String(user.telegram_id)) {
+      return 0;
+    }
+
+    // --------------------------------------------------
+    // اول قفل می‌کنیم که این Referral دوباره پرداخت نشود
+    // --------------------------------------------------
+
+    const changed = await db.execute({
+      sql: `
+        UPDATE users
+        SET referral_rewarded = 1
+        WHERE telegram_id = ?
+          AND referred_by IS NOT NULL
+          AND referred_by != ?
+          AND wallet_address IS NOT NULL
+          AND wallet_address != ''
+          AND referral_rewarded = 0
+      `,
+      args: [
+        String(telegramId),
+        String(telegramId)
+      ]
+    });
+
+    // اگر هیچ ردیفی تغییر نکرد یعنی قبلاً پرداخت شده
+    if (Number(changed.rowsAffected || 0) !== 1) {
+      return 0;
+    }
+
+    // --------------------------------------------------
+    // پیدا کردن معرف
+    // --------------------------------------------------
+
+    const referrerResult = await db.execute({
+      sql: `
+        SELECT telegram_id, balance
+        FROM users
+        WHERE telegram_id = ?
+        LIMIT 1
+      `,
+      args: [String(user.referred_by)]
+    });
+
+    if (!referrerResult.rows.length) {
+      // اگر معرف وجود نداشت، وضعیت را برمی‌گردانیم
+      await db.execute({
+        sql: `
+          UPDATE users
+          SET referral_rewarded = 0
+          WHERE telegram_id = ?
+        `,
+        args: [String(telegramId)]
+      });
+
+      return 0;
+    }
+
+    const referrer = referrerResult.rows[0];
+
+    // --------------------------------------------------
+    // پاداش Referral
+    // --------------------------------------------------
+
+    const REFERRAL_JOIN_REWARD = 100;
+
+    await db.execute({
+      sql: `
+        UPDATE users
+        SET balance = balance + ?
+        WHERE telegram_id = ?
+      `,
+      args: [
+        REFERRAL_JOIN_REWARD,
+        String(referrer.telegram_id)
+      ]
+    });
+
+    // --------------------------------------------------
+    // ثبت تراکنش
+    // --------------------------------------------------
+
+    await db.execute({
+      sql: `
+        INSERT INTO transactions
+        (
+          telegram_id,
+          type,
+          amount,
+          status,
+          details,
+          created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      args: [
+        String(referrer.telegram_id),
+        "REFERRAL",
+        REFERRAL_JOIN_REWARD,
+        "Completed",
+        `Referral reward for user ${String(telegramId)} connecting TON wallet`,
+        new Date().toISOString()
+      ]
+    });
+
+    console.log(
+      `Referral qualified: ${telegramId} -> ${referrer.telegram_id} (+${REFERRAL_JOIN_REWARD} SNP)`
+    );
+
+    return REFERRAL_JOIN_REWARD;
+
+  } catch (error) {
+
+    console.error(
+      "qualifyReferral error:",
+      error
+    );
+
+    return 0;
+  }
+}
   if (!changed.rowsAffected) return 0;
   const referrer = await getUser(user.referred_by);
   if (!referrer) return 0;
@@ -181,47 +330,392 @@ async function rewardUser(telegramId, amount, type, details) {
 }
 
 // ============================================================
-// DATABASE
+// DATABASE + SAFE MIGRATIONS
 // ============================================================
+
 async function ensureColumn(table, column, definition) {
-  const r = await db.execute(`PRAGMA table_info(${table})`);
-  if (!r.rows.some(x => String(x.name) === column)) await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-}
-async function initDB() {
-  await db.execute(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT UNIQUE NOT NULL, username TEXT, balance INTEGER DEFAULT 0,
-    energy INTEGER DEFAULT 1000, max_energy INTEGER DEFAULT 1000, last_energy_update TEXT, created_at TEXT,
-    last_daily_bonus TEXT, daily_streak INTEGER DEFAULT 0, referral_code TEXT UNIQUE, referred_by TEXT, wallet_address TEXT
-  )`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT NOT NULL, type TEXT, amount INTEGER, status TEXT, details TEXT, created_at TEXT
-  )`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS task_claims (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT NOT NULL, task_id TEXT NOT NULL, reward INTEGER NOT NULL, status TEXT, created_at TEXT,
-    UNIQUE(telegram_id,task_id)
-  )`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS daily_rewards (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT NOT NULL, day INTEGER NOT NULL, reward INTEGER NOT NULL, claimed_at TEXT,
-    UNIQUE(telegram_id,day,claimed_at)
-  )`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS boost_purchases (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT NOT NULL, boost_id TEXT NOT NULL, boost_type TEXT NOT NULL, level INTEGER NOT NULL, price INTEGER NOT NULL, created_at TEXT
-  )`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS withdrawals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, withdrawal_id TEXT UNIQUE, telegram_id TEXT, wallet_address TEXT, amount INTEGER, fee_ton TEXT, fee_nano TEXT,
-    treasury_wallet TEXT, token_contract TEXT, status TEXT DEFAULT 'payment_pending', fee_tx_hash TEXT, payout_tx_hash TEXT, created_at TEXT, verified_at TEXT, completed_at TEXT
-  )`);
-  await ensureColumn("users", "tap_power", "INTEGER DEFAULT 1");
-  await ensureColumn("users", "tap_boost_level", "INTEGER DEFAULT 1");
-  await ensureColumn("users", "energy_boost_level", "INTEGER DEFAULT 1");
-  await ensureColumn("users", "recharge_multiplier", "INTEGER DEFAULT 1");
-  await ensureColumn("users", "recharge_level", "INTEGER DEFAULT 1");
-  await ensureColumn("users", "referral_rewarded", "INTEGER DEFAULT 0");
-  // Existing users created by older versions may already have received the 100 SNP join reward.
-  await db.execute(`UPDATE users SET referral_rewarded=1 WHERE referred_by IS NOT NULL AND EXISTS (SELECT 1 FROM transactions t WHERE t.telegram_id=users.referred_by AND t.type='REFERRAL' AND t.details LIKE '%New SINAPS referral%')`);
-  console.log("Database ready");
+  try {
+    const result = await db.execute(`PRAGMA table_info(${table})`);
+
+    const exists = result.rows.some(
+      row => String(row.name) === String(column)
+    );
+
+    if (!exists) {
+      console.log(`Adding missing column: ${table}.${column}`);
+
+      await db.execute(
+        `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
+      );
+
+      console.log(`Added: ${table}.${column}`);
+    }
+  } catch (error) {
+    // SQLite/Turso can report "duplicate column" in a race.
+    // If it is already there, continue safely.
+    if (
+      String(error.message || "")
+        .toLowerCase()
+        .includes("duplicate column")
+    ) {
+      return;
+    }
+
+    throw error;
+  }
 }
 
+
+async function initDB() {
+
+  console.log("Initializing SINAPS database...");
+
+  // ----------------------------------------------------------
+  // USERS
+  // ----------------------------------------------------------
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT UNIQUE NOT NULL,
+      username TEXT,
+      balance INTEGER DEFAULT 0,
+
+      energy INTEGER DEFAULT 1000,
+      max_energy INTEGER DEFAULT 1000,
+      last_energy_update TEXT,
+
+      created_at TEXT,
+
+      last_daily_bonus TEXT,
+      daily_streak INTEGER DEFAULT 0,
+
+      referral_code TEXT UNIQUE,
+      referred_by TEXT,
+
+      wallet_address TEXT,
+
+      tap_power INTEGER DEFAULT 1,
+      tap_boost_level INTEGER DEFAULT 1,
+
+      energy_boost_level INTEGER DEFAULT 1,
+
+      recharge_multiplier INTEGER DEFAULT 1,
+      recharge_level INTEGER DEFAULT 1,
+
+      referral_rewarded INTEGER DEFAULT 0
+    )
+  `);
+
+
+  // ----------------------------------------------------------
+  // IMPORTANT:
+  // Older SINAPS users already have the users table.
+  // CREATE TABLE IF NOT EXISTS does NOT add new columns.
+  // Therefore we explicitly migrate every required column.
+  // ----------------------------------------------------------
+
+  await ensureColumn(
+    "users",
+    "username",
+    "TEXT"
+  );
+
+  await ensureColumn(
+    "users",
+    "balance",
+    "INTEGER DEFAULT 0"
+  );
+
+  await ensureColumn(
+    "users",
+    "energy",
+    "INTEGER DEFAULT 1000"
+  );
+
+  await ensureColumn(
+    "users",
+    "max_energy",
+    "INTEGER DEFAULT 1000"
+  );
+
+  await ensureColumn(
+    "users",
+    "last_energy_update",
+    "TEXT"
+  );
+
+  await ensureColumn(
+    "users",
+    "created_at",
+    "TEXT"
+  );
+
+  await ensureColumn(
+    "users",
+    "last_daily_bonus",
+    "TEXT"
+  );
+
+  await ensureColumn(
+    "users",
+    "daily_streak",
+    "INTEGER DEFAULT 0"
+  );
+
+  await ensureColumn(
+    "users",
+    "referral_code",
+    "TEXT"
+  );
+
+  // THIS IS THE COLUMN THAT CAUSED YOUR ERROR
+  await ensureColumn(
+    "users",
+    "referred_by",
+    "TEXT"
+  );
+
+  await ensureColumn(
+    "users",
+    "wallet_address",
+    "TEXT"
+  );
+
+  await ensureColumn(
+    "users",
+    "tap_power",
+    "INTEGER DEFAULT 1"
+  );
+
+  await ensureColumn(
+    "users",
+    "tap_boost_level",
+    "INTEGER DEFAULT 1"
+  );
+
+  await ensureColumn(
+    "users",
+    "energy_boost_level",
+    "INTEGER DEFAULT 1"
+  );
+
+  await ensureColumn(
+    "users",
+    "recharge_multiplier",
+    "INTEGER DEFAULT 1"
+  );
+
+  await ensureColumn(
+    "users",
+    "recharge_level",
+    "INTEGER DEFAULT 1"
+  );
+
+  await ensureColumn(
+    "users",
+    "referral_rewarded",
+    "INTEGER DEFAULT 0"
+  );
+
+
+  // ----------------------------------------------------------
+  // TRANSACTIONS
+  // ----------------------------------------------------------
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT NOT NULL,
+      type TEXT,
+      amount INTEGER,
+      status TEXT,
+      details TEXT,
+      created_at TEXT
+    )
+  `);
+
+
+  // ----------------------------------------------------------
+  // TASK CLAIMS
+  // ----------------------------------------------------------
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS task_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      reward INTEGER NOT NULL,
+      status TEXT,
+      created_at TEXT,
+
+      UNIQUE(telegram_id, task_id)
+    )
+  `);
+
+
+  // ----------------------------------------------------------
+  // DAILY REWARDS
+  // ----------------------------------------------------------
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS daily_rewards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT NOT NULL,
+      day INTEGER NOT NULL,
+      reward INTEGER NOT NULL,
+      claimed_at TEXT,
+
+      UNIQUE(telegram_id, day)
+    )
+  `);
+
+
+  // ----------------------------------------------------------
+  // BOOST PURCHASES
+  // ----------------------------------------------------------
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS boost_purchases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT NOT NULL,
+      boost_id TEXT NOT NULL,
+      boost_type TEXT NOT NULL,
+      level INTEGER NOT NULL,
+      price INTEGER NOT NULL,
+      created_at TEXT
+    )
+  `);
+
+
+  // ----------------------------------------------------------
+  // WITHDRAWALS
+  // ----------------------------------------------------------
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS withdrawals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      withdrawal_id TEXT UNIQUE,
+
+      telegram_id TEXT,
+
+      wallet_address TEXT,
+
+      amount INTEGER,
+
+      fee_ton TEXT,
+      fee_nano TEXT,
+
+      treasury_wallet TEXT,
+      token_contract TEXT,
+
+      status TEXT DEFAULT 'payment_pending',
+
+      fee_tx_hash TEXT,
+      payout_tx_hash TEXT,
+
+      created_at TEXT,
+      verified_at TEXT,
+      completed_at TEXT
+    )
+  `);
+
+
+  // ----------------------------------------------------------
+  // SAFETY DEFAULTS FOR OLD USERS
+  // ----------------------------------------------------------
+
+  await db.execute(`
+    UPDATE users
+    SET tap_power = 1
+    WHERE tap_power IS NULL
+  `);
+
+  await db.execute(`
+    UPDATE users
+    SET tap_boost_level = 1
+    WHERE tap_boost_level IS NULL
+  `);
+
+  await db.execute(`
+    UPDATE users
+    SET energy_boost_level = 1
+    WHERE energy_boost_level IS NULL
+  `);
+
+  await db.execute(`
+    UPDATE users
+    SET recharge_multiplier = 1
+    WHERE recharge_multiplier IS NULL
+  `);
+
+  await db.execute(`
+    UPDATE users
+    SET recharge_level = 1
+    WHERE recharge_level IS NULL
+  `);
+
+  await db.execute(`
+    UPDATE users
+    SET referral_rewarded = 0
+    WHERE referral_rewarded IS NULL
+  `);
+
+
+  // ----------------------------------------------------------
+  // CREATE REFERRAL CODES FOR OLD USERS
+  // ----------------------------------------------------------
+
+  const oldUsers = await db.execute(`
+    SELECT telegram_id
+    FROM users
+    WHERE referral_code IS NULL
+       OR referral_code = ''
+    LIMIT 1000
+  `);
+
+  for (const row of oldUsers.rows) {
+
+    let code = randomCode();
+
+    let exists = await db.execute({
+      sql: `
+        SELECT telegram_id
+        FROM users
+        WHERE referral_code = ?
+        LIMIT 1
+      `,
+      args: [code]
+    });
+
+    while (exists.rows.length) {
+      code = randomCode();
+
+      exists = await db.execute({
+        sql: `
+          SELECT telegram_id
+          FROM users
+          WHERE referral_code = ?
+          LIMIT 1
+        `,
+        args: [code]
+      });
+    }
+
+    await db.execute({
+      sql: `
+        UPDATE users
+        SET referral_code = ?
+        WHERE telegram_id = ?
+      `,
+      args: [code, String(row.telegram_id)]
+    });
+  }
+
+
+  console.log("SINAPS database migration completed successfully.");
+}
 // ============================================================
 // TELEGRAM / TON HELPERS
 // ============================================================
