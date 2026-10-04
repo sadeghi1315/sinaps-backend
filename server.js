@@ -1,1332 +1,2528 @@
-const express = require('express');
-const cors = require('cors');
-const crypto = require('crypto');
-const { createClient } = require('@libsql/client');
+const express = require("express");
+const cors = require("cors");
+const crypto = require("crypto");
+const { createClient } = require("@libsql/client");
 
 const app = express();
 
-app.use(cors());
-app.use(express.json({ limit:'1mb' }));
+app.use(cors({
+  origin: true,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "X-Telegram-Init-Data"
+  ]
+}));
 
-const PORT=process.env.PORT||10000;
+app.use(
+  express.json({
+    limit: "1mb"
+  })
+);
 
-const DB_URL=process.env.TURSO_DATABASE_URL;
-const DB_TOKEN=process.env.TURSO_AUTH_TOKEN;
 
-const BOT_TOKEN=process.env.TELEGRAM_BOT_TOKEN||'';
+const PORT =
+  process.env.PORT || 10000;
 
-const TREASURY_WALLET=
-  process.env.TREASURY_WALLET||
-  'UQDMsJu14wu-EHSjaRpufQdPb73pKVRkQvHNezgA2zF69sJX';
+const DB_URL =
+  process.env.TURSO_DATABASE_URL;
 
-const SNP_CONTRACT=
-  'EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls';
+const DB_TOKEN =
+  process.env.TURSO_AUTH_TOKEN;
 
-const TONCENTER_API_KEY=
-  process.env.TONCENTER_API_KEY||'';
+const BOT_TOKEN =
+  process.env.TELEGRAM_BOT_TOKEN;
 
-const TONCENTER='https://toncenter.com/api/v3';
 
-const FEE_NANO='100000000';
+const TREASURY_WALLET =
+  process.env.TREASURY_WALLET ||
+  "UQDMsJu14wu-EHSjaRpufQdPb73pKVRkQvHNezgA2zF69sJX";
 
-const REFERRAL_RATE=0.15;
 
-const TASKS={
+const SNP_CONTRACT =
+  process.env.SNP_CONTRACT ||
+  "EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls";
 
-  channel:{
-    id:'channel',
-    title:'Join SINAPS Channel',
-    reward:100,
-    icon:'📢',
-    url:'https://t.me/SINAPS_COIN',
-    chat:'@SINAPS_COIN'
-  },
 
-  group:{
-    id:'group',
-    title:'Join SINAPS Group',
-    reward:70,
-    icon:'👥',
-    url:'https://t.me/SINAPS_Group',
-    chat:'@SINAPS_Group'
-  },
+const TONCENTER =
+  process.env.TONCENTER_API ||
+  "https://toncenter.com/api/v3";
 
-  twitter:{
-    id:'twitter',
-    title:'Follow SINAPS on X',
-    reward:50,
-    icon:'𝕏',
-    url:'https://x.com/SINAPS_SNP'
-  },
 
-  holder:{
-    id:'holder',
-    title:'Hold 50,000 SNP',
-    reward:1000,
-    icon:'💎',
-    url:'#'
-  }
+const FEE_NANO =
+  "100000000";
 
-};
 
-if(!DB_URL||!DB_TOKEN){
+const ENERGY_REGEN_SECONDS =
+  3;
+
+
+const REFERRAL_RATE =
+  0.15;
+
+
+if (!DB_URL || !DB_TOKEN) {
 
   console.error(
-    'Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN'
+    "Missing Turso environment variables"
   );
 
   process.exit(1);
 }
 
-const db=createClient({
-  url:DB_URL,
-  authToken:DB_TOKEN
-});
 
-/* =========================================================
-   TELEGRAM AUTH
-========================================================= */
+const db =
+  createClient({
+    url: DB_URL,
+    authToken: DB_TOKEN
+  });
 
-function verifyTelegram(initData){
 
-  if(!BOT_TOKEN||!initData)
+// ============================================================
+// BOOST CONFIG
+// ============================================================
+
+const BOOSTS = {
+
+  tap2: {
+    id: "tap2",
+    type: "tap",
+    level: 2,
+    name: "Tap ×2",
+    description: "2 SNP per tap",
+    price: 200,
+    icon: "⚡"
+  },
+
+  tap3: {
+    id: "tap3",
+    type: "tap",
+    level: 3,
+    name: "Tap ×3",
+    description: "3 SNP per tap",
+    price: 300,
+    icon: "⚡"
+  },
+
+  tap4: {
+    id: "tap4",
+    type: "tap",
+    level: 4,
+    name: "Tap ×4",
+    description: "4 SNP per tap",
+    price: 500,
+    icon: "⚡"
+  },
+
+  tap5: {
+    id: "tap5",
+    type: "tap",
+    level: 5,
+    name: "Tap ×5",
+    description: "5 SNP per tap",
+    price: 800,
+    icon: "⚡"
+  },
+
+
+  energy2: {
+    id: "energy2",
+    type: "energy",
+    level: 2,
+    name: "Energy ×2",
+    description: "Maximum 2,000 energy",
+    price: 200,
+    icon: "🔋"
+  },
+
+  energy3: {
+    id: "energy3",
+    type: "energy",
+    level: 3,
+    name: "Energy ×3",
+    description: "Maximum 3,000 energy",
+    price: 350,
+    icon: "🔋"
+  },
+
+  energy4: {
+    id: "energy4",
+    type: "energy",
+    level: 4,
+    name: "Energy ×4",
+    description: "Maximum 4,000 energy",
+    price: 600,
+    icon: "🔋"
+  },
+
+  energy5: {
+    id: "energy5",
+    type: "energy",
+    level: 5,
+    name: "Energy ×5",
+    description: "Maximum 5,000 energy",
+    price: 1000,
+    icon: "🔋"
+  },
+
+
+  recharge2: {
+    id: "recharge2",
+    type: "recharge",
+    level: 2,
+    name: "Recharge ×2",
+    description: "2× faster",
+    price: 150,
+    icon: "🚀"
+  },
+
+  recharge3: {
+    id: "recharge3",
+    type: "recharge",
+    level: 3,
+    name: "Recharge ×3",
+    description: "3× faster",
+    price: 300,
+    icon: "🚀"
+  },
+
+  recharge5: {
+    id: "recharge5",
+    type: "recharge",
+    level: 5,
+    name: "Recharge ×5",
+    description: "5× faster",
+    price: 600,
+    icon: "🚀"
+  }
+
+};
+
+
+// ============================================================
+// TASKS
+// ============================================================
+
+const TASKS = [
+
+  {
+    id: "channel",
+    name: "Join SINAPS Channel",
+    reward: 100,
+    icon: "📢",
+    url: "https://t.me/SINAPS_COIN",
+    chat: "@SINAPS_COIN",
+    type: "telegram"
+  },
+
+  {
+    id: "group",
+    name: "Join SINAPS Group",
+    reward: 70,
+    icon: "👥",
+    url: "https://t.me/SINAPS_Group",
+    chat: "@SINAPS_Group",
+    type: "telegram"
+  },
+
+  {
+    id: "twitter",
+    name: "Follow SINAPS on X",
+    reward: 50,
+    icon: "𝕏",
+    url: "https://x.com/SINAPS_SNP",
+    type: "twitter"
+  },
+
+  {
+    id: "holder",
+    name: "Hold 50,000 SNP",
+    reward: 1000,
+    icon: "💎",
+    url: "#",
+    type: "holder"
+  }
+
+];
+
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function now() {
+  return new Date().toISOString();
+}
+
+
+function randomCode() {
+
+  return crypto
+    .randomBytes(8)
+    .toString("hex")
+    .slice(0, 8)
+    .toUpperCase();
+}
+
+
+function parseTime(value) {
+
+  if (!value) {
+    return Date.now();
+  }
+
+  let s =
+    String(value);
+
+  if (
+    !s.endsWith("Z") &&
+    !/[+-]\d\d:\d\d$/.test(s)
+  ) {
+
+    s =
+      s.replace(" ", "T") +
+      "Z";
+  }
+
+  const time =
+    Date.parse(s);
+
+  return Number.isFinite(time)
+    ? time
+    : Date.now();
+}
+
+
+// ============================================================
+// TELEGRAM AUTH
+// ============================================================
+
+function verifyTelegram(
+  initData
+) {
+
+  if (
+    !initData ||
+    !BOT_TOKEN
+  ) {
+
     return null;
+  }
 
-  try{
 
-    const params=new URLSearchParams(initData);
+  try {
 
-    const hash=params.get('hash');
+    const params =
+      new URLSearchParams(
+        initData
+      );
 
-    if(!hash)return null;
 
-    params.delete('hash');
+    const hash =
+      params.get("hash");
 
-    const dataCheck=Array
-      .from(params.entries())
-      .sort(([a],[b])=>a.localeCompare(b))
-      .map(([k,v])=>`${k}=${v}`)
-      .join('\n');
 
-    const secret=crypto
-      .createHmac('sha256','WebAppData')
-      .update(BOT_TOKEN)
-      .digest();
-
-    const calculated=crypto
-      .createHmac('sha256',secret)
-      .update(dataCheck)
-      .digest('hex');
-
-    if(calculated!==hash)
+    if (!hash) {
       return null;
+    }
 
-    const authDate=Number(params.get('auth_date')||0);
 
-    if(Date.now()/1000-authDate>86400)
+    const authDate =
+      Number(
+        params.get("auth_date")
+      );
+
+
+    if (!authDate) {
       return null;
+    }
 
-    const telegramUser=
-      JSON.parse(params.get('user')||'{}');
 
-    return telegramUser;
+    if (
+      Math.abs(
+        Math.floor(
+          Date.now() / 1000
+        ) -
+        authDate
+      ) >
+      86400
+    ) {
 
-  }catch{
+      return null;
+    }
+
+
+    params.delete("hash");
+
+
+    const dataCheckString =
+      [...params.entries()]
+        .sort(
+          ([a], [b]) =>
+            a.localeCompare(b)
+        )
+        .map(
+          ([key, value]) =>
+            `${key}=${value}`
+        )
+        .join("\n");
+
+
+    const secret =
+      crypto
+        .createHmac(
+          "sha256",
+          "WebAppData"
+        )
+        .update(
+          BOT_TOKEN
+        )
+        .digest();
+
+
+    const calculated =
+      crypto
+        .createHmac(
+          "sha256",
+          secret
+        )
+        .update(
+          dataCheckString
+        )
+        .digest("hex");
+
+
+    if (
+      calculated.length !==
+      hash.length
+    ) {
+
+      return null;
+    }
+
+
+    if (
+      !crypto.timingSafeEqual(
+        Buffer.from(calculated),
+        Buffer.from(hash)
+      )
+    ) {
+
+      return null;
+    }
+
+
+    const userRaw =
+      params.get("user");
+
+
+    if (!userRaw) {
+      return null;
+    }
+
+
+    const user =
+      JSON.parse(
+        userRaw
+      );
+
+
+    if (!user?.id) {
+      return null;
+    }
+
+
+    return {
+      id: String(user.id),
+      username:
+        user.username || ""
+    };
+
+
+  } catch (error) {
+
+    console.error(
+      "Telegram auth:",
+      error.message
+    );
 
     return null;
   }
 }
 
-function auth(req){
 
-  const header=req.headers['x-telegram-init-data'];
+function auth(req) {
 
-  const verified=verifyTelegram(header||'');
-
-  if(verified?.id)
-    return Number(verified.id);
-
-  return null;
-}
-
-function normalizeId(value){
-
-  const n=Number(value);
-
-  if(!Number.isSafeInteger(n)||n<=0)
-    return null;
-
-  return n;
-}
-
-/* =========================================================
-   TELEGRAM API
-========================================================= */
-
-async function telegram(method,params={}){
-
-  if(!BOT_TOKEN)
-    throw new Error('TELEGRAM_BOT_TOKEN is missing');
-
-  const r=await fetch(
-    `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
-    {
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json'
-      },
-      body:JSON.stringify(params)
-    }
+  return verifyTelegram(
+    req.headers[
+      "x-telegram-init-data"
+    ]
   );
-
-  const d=await r.json();
-
-  if(!d.ok)
-    throw new Error(
-      d.description||'Telegram API error'
-    );
-
-  return d.result;
 }
 
-/* =========================================================
-   DATABASE
-========================================================= */
 
-async function initDatabase(){
+// ============================================================
+// USER HELPERS
+// ============================================================
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS users(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      telegram_id INTEGER NOT NULL UNIQUE,
-      username TEXT DEFAULT '',
-      balance INTEGER NOT NULL DEFAULT 0,
-      energy INTEGER NOT NULL DEFAULT 1000,
-      max_energy INTEGER NOT NULL DEFAULT 1000,
-      last_energy_update TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_daily_bonus TEXT,
-      daily_streak INTEGER NOT NULL DEFAULT 0,
-      referral_code TEXT UNIQUE,
-      referred_by INTEGER,
-      wallet_address TEXT
-    )
-  `);
+async function getUser(
+  telegramId
+) {
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS task_claims(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      telegram_id INTEGER NOT NULL,
-      task_id TEXT NOT NULL,
-      reward INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'completed',
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(telegram_id,task_id)
-    )
-  `);
+  const result =
+    await db.execute({
+      sql: `
+        SELECT *
+        FROM users
+        WHERE telegram_id = ?
+        LIMIT 1
+      `,
+      args: [
+        String(telegramId)
+      ]
+    });
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS daily_rewards(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      telegram_id INTEGER NOT NULL,
-      day INTEGER NOT NULL,
-      reward INTEGER NOT NULL,
-      claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(telegram_id,day)
-    )
-  `);
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS transactions(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      telegram_id INTEGER NOT NULL,
-      type TEXT NOT NULL,
-      amount INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'completed',
-      details TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS withdrawals(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      withdrawal_id TEXT NOT NULL UNIQUE,
-      telegram_id INTEGER NOT NULL,
-      wallet_address TEXT NOT NULL,
-      amount INTEGER NOT NULL,
-      fee_ton REAL NOT NULL DEFAULT 0.1,
-      fee_nano TEXT NOT NULL DEFAULT '100000000',
-      treasury_wallet TEXT NOT NULL,
-      token_contract TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'payment_pending',
-      fee_tx_hash TEXT,
-      payout_tx_hash TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      verified_at TEXT,
-      completed_at TEXT
-    )
-  `);
-
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS tx_user_idx
-    ON transactions(telegram_id)
-  `);
-
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS task_user_idx
-    ON task_claims(telegram_id)
-  `);
-
-  console.log('Database initialized');
-
+  return (
+    result.rows[0] ||
+    null
+  );
 }
 
-/* =========================================================
-   HELPERS
-========================================================= */
 
-function referralCode(){
+function publicUser(
+  user
+) {
 
-  return 'SNP-'+
-    crypto.randomBytes(4)
-      .toString('hex')
-      .toUpperCase();
+  return {
 
+    telegram_id:
+      String(user.telegram_id),
+
+    username:
+      user.username || "",
+
+    balance:
+      Number(user.balance || 0),
+
+    energy:
+      Number(user.energy || 0),
+
+    max_energy:
+      Number(user.max_energy || 1000),
+
+    tap_power:
+      Number(user.tap_power || 1),
+
+    tap_boost_level:
+      Number(
+        user.tap_boost_level || 1
+      ),
+
+    energy_boost_level:
+      Number(
+        user.energy_boost_level || 1
+      ),
+
+    recharge_multiplier:
+      Number(
+        user.recharge_multiplier || 1
+      ),
+
+    recharge_level:
+      Number(
+        user.recharge_level || 1
+      ),
+
+    wallet_address:
+      user.wallet_address ||
+      null,
+
+    referral_code:
+      user.referral_code ||
+      ""
+
+  };
 }
+
 
 async function addTransaction(
   telegramId,
   type,
   amount,
   status,
-  details=''
-){
+  details
+) {
 
   await db.execute({
-    sql:`
+    sql: `
       INSERT INTO transactions
-      (telegram_id,type,amount,status,details)
-      VALUES(?,?,?,?,?)
+      (
+        telegram_id,
+        type,
+        amount,
+        status,
+        details,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
     `,
-    args:[
-      telegramId,
+    args: [
+      String(telegramId),
       type,
-      amount,
+      Number(amount),
       status,
-      details
+      details || "",
+      now()
     ]
   });
-
 }
 
-async function rewardUser(
-  telegramId,
-  amount,
-  type,
-  details=''
-){
 
-  await db.execute({
-    sql:`
-      UPDATE users
-      SET balance=balance+?
-      WHERE telegram_id=?
-    `,
-    args:[
-      amount,
+// ============================================================
+// ENERGY SYNC
+// ============================================================
+
+async function syncEnergy(
+  telegramId
+) {
+
+  const user =
+    await getUser(
       telegramId
-    ]
-  });
-
-  await addTransaction(
-    telegramId,
-    type,
-    amount,
-    'completed',
-    details
-  );
-
-}
-
-/* =========================================================
-   HEALTH
-========================================================= */
-
-app.get('/',(req,res)=>{
-
-  res.json({
-    ok:true,
-    service:'SINAPS backend',
-    database:'Turso',
-    status:'online'
-  });
-
-});
-
-/* =========================================================
-   USER
-========================================================= */
-
-app.post('/api/user',async(req,res)=>{
-
-  try{
-
-    const verified=auth(req);
-
-    const telegramId=normalizeId(
-      verified?.id||req.body.telegram_id
     );
 
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Telegram authentication failed'
-      });
 
-    const username=
-      String(
-        verified?.username||
-        req.body.username||
-        ''
-      );
+  if (!user) {
+    return null;
+  }
 
-    let result=await db.execute({
-      sql:`
-        SELECT *
-        FROM users
-        WHERE telegram_id=?
-        LIMIT 1
-      `,
-      args:[telegramId]
+
+  const maxEnergy =
+    Number(
+      user.max_energy || 1000
+    );
+
+
+  const energy =
+    Number(
+      user.energy || 0
+    );
+
+
+  const multiplier =
+    Number(
+      user.recharge_multiplier || 1
+    );
+
+
+  const last =
+    parseTime(
+      user.last_energy_update
+    );
+
+
+  const elapsed =
+    Math.max(
+      0,
+      Date.now() - last
+    );
+
+
+  const interval =
+    (
+      ENERGY_REGEN_SECONDS *
+      1000
+    ) /
+    Math.max(
+      1,
+      multiplier
+    );
+
+
+  const gained =
+    Math.floor(
+      elapsed / interval
+    );
+
+
+  if (gained <= 0) {
+    return user;
+  }
+
+
+  const newEnergy =
+    Math.min(
+      maxEnergy,
+      energy + gained
+    );
+
+
+  const newTime =
+    newEnergy >= maxEnergy
+      ? now()
+      : new Date(
+          last +
+          gained * interval
+        ).toISOString();
+
+
+  await db.execute({
+    sql: `
+      UPDATE users
+      SET
+        energy = ?,
+        last_energy_update = ?
+      WHERE telegram_id = ?
+    `,
+    args: [
+      newEnergy,
+      newTime,
+      String(telegramId)
+    ]
+  });
+
+
+  return getUser(
+    telegramId
+  );
+}
+
+
+// ============================================================
+// DATABASE
+// ============================================================
+
+async function ensureColumn(
+  table,
+  column,
+  definition
+) {
+
+  const result =
+    await db.execute(
+      `PRAGMA table_info(${table})`
+    );
+
+
+  const exists =
+    result.rows.some(
+      row =>
+        String(row.name) ===
+        column
+    );
+
+
+  if (!exists) {
+
+    await db.execute(
+      `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
+    );
+  }
+}
+
+
+async function initDB() {
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      telegram_id TEXT UNIQUE NOT NULL,
+
+      username TEXT,
+
+      balance INTEGER DEFAULT 0,
+
+      energy INTEGER DEFAULT 1000,
+
+      max_energy INTEGER DEFAULT 1000,
+
+      last_energy_update TEXT,
+
+      created_at TEXT,
+
+      last_daily_bonus TEXT,
+
+      daily_streak INTEGER DEFAULT 0,
+
+      referral_code TEXT UNIQUE,
+
+      referred_by TEXT,
+
+      wallet_address TEXT
+
+    )
+  `);
+
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS transactions (
+
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      telegram_id TEXT NOT NULL,
+
+      type TEXT,
+
+      amount INTEGER,
+
+      status TEXT,
+
+      details TEXT,
+
+      created_at TEXT
+
+    )
+  `);
+
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS task_claims (
+
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      telegram_id TEXT NOT NULL,
+
+      task_id TEXT NOT NULL,
+
+      reward INTEGER NOT NULL,
+
+      status TEXT,
+
+      created_at TEXT,
+
+      UNIQUE(telegram_id, task_id)
+
+    )
+  `);
+
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS daily_rewards (
+
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      telegram_id TEXT NOT NULL,
+
+      day INTEGER NOT NULL,
+
+      reward INTEGER NOT NULL,
+
+      claimed_at TEXT
+
+    )
+  `);
+
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS boost_purchases (
+
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      telegram_id TEXT NOT NULL,
+
+      boost_id TEXT NOT NULL,
+
+      boost_type TEXT NOT NULL,
+
+      level INTEGER NOT NULL,
+
+      price INTEGER NOT NULL,
+
+      created_at TEXT
+
+    )
+  `);
+
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS withdrawals (
+
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      withdrawal_id TEXT UNIQUE,
+
+      telegram_id TEXT,
+
+      wallet_address TEXT,
+
+      amount INTEGER,
+
+      fee_ton TEXT,
+
+      fee_nano TEXT,
+
+      treasury_wallet TEXT,
+
+      token_contract TEXT,
+
+      status TEXT DEFAULT 'payment_pending',
+
+      fee_tx_hash TEXT,
+
+      payout_tx_hash TEXT,
+
+      created_at TEXT,
+
+      verified_at TEXT,
+
+      completed_at TEXT
+
+    )
+  `);
+
+
+  await ensureColumn(
+    "users",
+    "tap_power",
+    "INTEGER DEFAULT 1"
+  );
+
+
+  await ensureColumn(
+    "users",
+    "tap_boost_level",
+    "INTEGER DEFAULT 1"
+  );
+
+
+  await ensureColumn(
+    "users",
+    "energy_boost_level",
+    "INTEGER DEFAULT 1"
+  );
+
+
+  await ensureColumn(
+    "users",
+    "recharge_multiplier",
+    "INTEGER DEFAULT 1"
+  );
+
+
+  await ensureColumn(
+    "users",
+    "recharge_level",
+    "INTEGER DEFAULT 1"
+  );
+
+
+  console.log(
+    "Database ready"
+  );
+}
+
+
+// ============================================================
+// ROOT
+// ============================================================
+
+app.get(
+  "/",
+  (req, res) => {
+
+    res.json({
+      project: "SINAPS",
+      status: "online",
+      version: "3.0.0"
     });
 
-    if(!result.rows.length){
+  }
+);
 
-      let code=referralCode();
+
+// ============================================================
+// USER
+// ============================================================
+
+app.post(
+  "/api/user",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        auth(req);
+
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Telegram authentication required"
+          });
+      }
+
+
+      const telegramId =
+        verified.id;
+
+
+      const username =
+        verified.username ||
+        "";
+
+
+      const startParam =
+        String(
+          req.body.start_param ||
+          ""
+        ).trim();
+
+
+      let user =
+        await getUser(
+          telegramId
+        );
+
+
+      if (!user) {
+
+        let referralCode =
+          randomCode();
+
+
+        let referralExists =
+          await db.execute({
+            sql: `
+              SELECT telegram_id
+              FROM users
+              WHERE referral_code = ?
+            `,
+            args: [
+              referralCode
+            ]
+          });
+
+
+        while (
+          referralExists.rows.length
+        ) {
+
+          referralCode =
+            randomCode();
+
+
+          referralExists =
+            await db.execute({
+              sql: `
+                SELECT telegram_id
+                FROM users
+                WHERE referral_code = ?
+              `,
+              args: [
+                referralCode
+              ]
+            });
+        }
+
+
+        let referredBy =
+          null;
+
+
+        if (startParam) {
+
+          const ref =
+            await db.execute({
+              sql: `
+                SELECT telegram_id
+                FROM users
+                WHERE referral_code = ?
+                LIMIT 1
+              `,
+              args: [
+                startParam
+              ]
+            });
+
+
+          if (
+            ref.rows.length &&
+            String(
+              ref.rows[0].telegram_id
+            ) !== telegramId
+          ) {
+
+            referredBy =
+              String(
+                ref.rows[0].telegram_id
+              );
+          }
+        }
+
+
+        await db.execute({
+          sql: `
+            INSERT INTO users
+            (
+              telegram_id,
+              username,
+              balance,
+              energy,
+              max_energy,
+              last_energy_update,
+              created_at,
+              daily_streak,
+              referral_code,
+              referred_by,
+              tap_power,
+              tap_boost_level,
+              energy_boost_level,
+              recharge_multiplier,
+              recharge_level
+            )
+            VALUES
+            (
+              ?, ?, 0, 1000, 1000,
+              ?, ?, 0, ?, ?,
+              1, 1, 1, 1, 1
+            )
+          `,
+          args: [
+            telegramId,
+            username,
+            now(),
+            now(),
+            referralCode,
+            referredBy
+          ]
+        });
+
+
+        user =
+          await getUser(
+            telegramId
+          );
+
+
+        if (referredBy) {
+
+          await db.execute({
+            sql: `
+              UPDATE users
+              SET balance =
+                balance + 100
+              WHERE telegram_id = ?
+            `,
+            args: [
+              referredBy
+            ]
+          });
+
+
+          await addTransaction(
+            referredBy,
+            "REFERRAL",
+            100,
+            "Completed",
+            "New SINAPS referral"
+          );
+        }
+
+
+      } else {
+
+        await db.execute({
+          sql: `
+            UPDATE users
+            SET username = ?
+            WHERE telegram_id = ?
+          `,
+          args: [
+            username,
+            telegramId
+          ]
+        });
+
+      }
+
+
+      user =
+        await syncEnergy(
+          telegramId
+        );
+
+
+      res.json({
+        ok: true,
+        user:
+          publicUser(user)
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "/api/user",
+        error
+      );
+
+
+      res
+        .status(500)
+        .json({
+          error:
+            "Failed to load user"
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// TAP
+// ============================================================
+
+app.post(
+  "/api/tap",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        auth(req);
+
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const telegramId =
+        verified.id;
+
+
+      const user =
+        await syncEnergy(
+          telegramId
+        );
+
+
+      if (!user) {
+
+        return res
+          .status(404)
+          .json({
+            error:
+              "User not found"
+          });
+      }
+
+
+      const count =
+        Math.min(
+          50,
+          Math.max(
+            1,
+            Math.floor(
+              Number(
+                req.body.count || 1
+              )
+            )
+          )
+        );
+
+
+      const energy =
+        Number(
+          user.energy || 0
+        );
+
+
+      const tapPower =
+        Number(
+          user.tap_power || 1
+        );
+
+
+      const usable =
+        Math.min(
+          count,
+          energy
+        );
+
+
+      if (usable <= 0) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "No energy",
+            user:
+              publicUser(user)
+          });
+      }
+
+
+      const reward =
+        usable *
+        tapPower;
+
+
+      const newEnergy =
+        energy -
+        usable;
+
 
       await db.execute({
-        sql:`
-          INSERT INTO users
-          (
-            telegram_id,
-            username,
-            balance,
-            energy,
-            max_energy,
-            last_energy_update,
-            referral_code
-          )
-          VALUES(?,?,0,1000,1000,CURRENT_TIMESTAMP,?)
+        sql: `
+          UPDATE users
+          SET
+            balance =
+              balance + ?,
+
+            energy = ?,
+
+            last_energy_update = ?
+
+          WHERE telegram_id = ?
+            AND energy >= ?
         `,
-        args:[
+        args: [
+          reward,
+          newEnergy,
+          now(),
           telegramId,
-          username,
-          code
+          usable
         ]
       });
 
-    }else{
+
+      const updated =
+        await getUser(
+          telegramId
+        );
+
+
+      res.json({
+        ok: true,
+        taps:
+          usable,
+        reward,
+        user:
+          publicUser(updated)
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "/api/tap",
+        error
+      );
+
+
+      res
+        .status(500)
+        .json({
+          error:
+            "Tap failed"
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// BOOSTS
+// ============================================================
+
+app.get(
+  "/api/boosts",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        auth(req);
+
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const user =
+        await syncEnergy(
+          verified.id
+        );
+
+
+      const tapLevel =
+        Number(
+          user.tap_boost_level || 1
+        );
+
+
+      const energyLevel =
+        Number(
+          user.energy_boost_level || 1
+        );
+
+
+      const rechargeLevel =
+        Number(
+          user.recharge_level || 1
+        );
+
+
+      const boosts =
+        Object.values(
+          BOOSTS
+        ).map(
+          boost => {
+
+            let current =
+              1;
+
+
+            if (
+              boost.type === "tap"
+            ) {
+              current =
+                tapLevel;
+            }
+
+
+            if (
+              boost.type === "energy"
+            ) {
+              current =
+                energyLevel;
+            }
+
+
+            if (
+              boost.type === "recharge"
+            ) {
+              current =
+                rechargeLevel;
+            }
+
+
+            return {
+
+              ...boost,
+
+              current_level:
+                current,
+
+              owned:
+                current >=
+                boost.level
+
+            };
+          }
+        );
+
+
+      res.json({
+        ok: true,
+        balance:
+          Number(
+            user.balance || 0
+          ),
+        boosts
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "/api/boosts",
+        error
+      );
+
+
+      res
+        .status(500)
+        .json({
+          error:
+            "Failed to load boosts"
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// BUY BOOST
+// ============================================================
+
+app.post(
+  "/api/boosts/buy",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        auth(req);
+
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const telegramId =
+        verified.id;
+
+
+      const boost =
+        BOOSTS[
+          String(
+            req.body.boost_id ||
+            ""
+          )
+        ];
+
+
+      if (!boost) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Invalid boost"
+          });
+      }
+
+
+      const user =
+        await syncEnergy(
+          telegramId
+        );
+
+
+      const current =
+        boost.type === "tap"
+          ? Number(
+              user.tap_boost_level || 1
+            )
+          : boost.type === "energy"
+            ? Number(
+                user.energy_boost_level || 1
+              )
+            : Number(
+                user.recharge_level || 1
+              );
+
+
+      if (
+        current >=
+        boost.level
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Boost already active"
+          });
+      }
+
+
+      if (
+        boost.level >
+        current + 1
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Buy the previous level first"
+          });
+      }
+
+
+      const deducted =
+        await db.execute({
+          sql: `
+            UPDATE users
+            SET balance =
+              balance - ?
+            WHERE telegram_id = ?
+              AND balance >= ?
+          `,
+          args: [
+            boost.price,
+            telegramId,
+            boost.price
+          ]
+        });
+
+
+      if (
+        !deducted.rowsAffected
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Not enough SNP"
+          });
+      }
+
+
+      if (
+        boost.type === "tap"
+      ) {
+
+        await db.execute({
+          sql: `
+            UPDATE users
+            SET
+              tap_power = ?,
+              tap_boost_level = ?
+            WHERE telegram_id = ?
+          `,
+          args: [
+            boost.level,
+            boost.level,
+            telegramId
+          ]
+        });
+      }
+
+
+      if (
+        boost.type === "energy"
+      ) {
+
+        const oldMax =
+          Number(
+            user.max_energy || 1000
+          );
+
+
+        const newMax =
+          boost.level *
+          1000;
+
+
+        const energy =
+          Number(
+            user.energy || 0
+          );
+
+
+        const newEnergy =
+          Math.min(
+            newMax,
+            energy +
+            Math.max(
+              0,
+              newMax - oldMax
+            )
+          );
+
+
+        await db.execute({
+          sql: `
+            UPDATE users
+            SET
+              max_energy = ?,
+              energy = ?,
+              energy_boost_level = ?
+            WHERE telegram_id = ?
+          `,
+          args: [
+            newMax,
+            newEnergy,
+            boost.level,
+            telegramId
+          ]
+        });
+      }
+
+
+      if (
+        boost.type === "recharge"
+      ) {
+
+        await db.execute({
+          sql: `
+            UPDATE users
+            SET
+              recharge_multiplier = ?,
+              recharge_level = ?
+            WHERE telegram_id = ?
+          `,
+          args: [
+            boost.level,
+            boost.level,
+            telegramId
+          ]
+        });
+      }
+
 
       await db.execute({
-        sql:`
-          UPDATE users
-          SET username=?
-          WHERE telegram_id=?
+        sql: `
+          INSERT INTO boost_purchases
+          (
+            telegram_id,
+            boost_id,
+            boost_type,
+            level,
+            price,
+            created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?)
         `,
-        args:[
-          username,
+        args: [
+          telegramId,
+          boost.id,
+          boost.type,
+          boost.level,
+          boost.price,
+          now()
+        ]
+      });
+
+
+      await addTransaction(
+        telegramId,
+        "BOOST",
+        -boost.price,
+        "Completed",
+        `Purchased ${boost.name}`
+      );
+
+
+      const updated =
+        await getUser(
+          telegramId
+        );
+
+
+      res.json({
+
+        ok: true,
+
+        message:
+          `${boost.name} activated`,
+
+        user:
+          publicUser(updated)
+
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "/api/boosts/buy",
+        error
+      );
+
+
+      res
+        .status(500)
+        .json({
+          error:
+            "Boost purchase failed"
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// DAILY STATUS
+// ============================================================
+
+function dateOnly(
+  date = new Date()
+) {
+
+  return date
+    .toISOString()
+    .slice(0, 10);
+}
+
+
+function dayDifference(
+  oldDate,
+  newDate
+) {
+
+  const a =
+    new Date(
+      `${oldDate}T00:00:00Z`
+    );
+
+
+  const b =
+    new Date(
+      `${newDate}T00:00:00Z`
+    );
+
+
+  return Math.round(
+    Math.abs(
+      b - a
+    ) /
+    86400000
+  );
+}
+
+
+app.get(
+  "/api/daily/status",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        auth(req);
+
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const user =
+        await getUser(
+          verified.id
+        );
+
+
+      const today =
+        dateOnly();
+
+
+      const last =
+        user.last_daily_bonus
+          ? String(
+              user.last_daily_bonus
+            ).slice(0, 10)
+          : null;
+
+
+      const claimedToday =
+        last === today;
+
+
+      let nextDay =
+        1;
+
+
+      if (claimedToday) {
+
+        nextDay =
+          Number(
+            user.daily_streak || 1
+          );
+
+      } else if (
+        last &&
+        dayDifference(
+          last,
+          today
+        ) === 1
+      ) {
+
+        nextDay =
+          Number(
+            user.daily_streak || 0
+          ) + 1;
+
+      }
+
+
+      if (
+        nextDay > 30
+      ) {
+        nextDay = 1;
+      }
+
+
+      let claimedDays = [];
+
+
+      if (
+        claimedToday ||
+        (
+          last &&
+          dayDifference(
+            last,
+            today
+          ) === 1
+        )
+      ) {
+
+        const streak =
+          Number(
+            user.daily_streak || 0
+          );
+
+
+        if (
+          streak > 0
+        ) {
+
+          for (
+            let i = 1;
+            i <= streak;
+            i++
+          ) {
+
+            claimedDays.push(
+              i
+            );
+          }
+        }
+      }
+
+
+      res.json({
+
+        ok: true,
+
+        claimedToday,
+
+        currentDay:
+          Number(
+            user.daily_streak || 0
+          ),
+
+        nextDay,
+
+        reward:
+          nextDay * 10,
+
+        claimedDays
+
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "/api/daily/status",
+        error
+      );
+
+
+      res
+        .status(500)
+        .json({
+          error:
+            "Daily status failed"
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// DAILY CLAIM
+// ============================================================
+
+app.post(
+  "/api/daily/claim",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        auth(req);
+
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const telegramId =
+        verified.id;
+
+
+      const user =
+        await getUser(
+          telegramId
+        );
+
+
+      const today =
+        dateOnly();
+
+
+      const last =
+        user.last_daily_bonus
+          ? String(
+              user.last_daily_bonus
+            ).slice(0, 10)
+          : null;
+
+
+      if (
+        last === today
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Daily reward already claimed"
+          });
+      }
+
+
+      let day =
+        1;
+
+
+      if (
+        last &&
+        dayDifference(
+          last,
+          today
+        ) === 1
+      ) {
+
+        day =
+          Number(
+            user.daily_streak || 0
+          ) + 1;
+      }
+
+
+      if (
+        day > 30
+      ) {
+        day = 1;
+      }
+
+
+      const reward =
+        day * 10;
+
+
+      await db.execute({
+        sql: `
+          UPDATE users
+          SET
+            balance =
+              balance + ?,
+
+            daily_streak = ?,
+
+            last_daily_bonus = ?
+
+          WHERE telegram_id = ?
+        `,
+        args: [
+          reward,
+          day,
+          today,
           telegramId
         ]
       });
 
-    }
 
-    result=await db.execute({
-      sql:`
-        SELECT *
-        FROM users
-        WHERE telegram_id=?
-        LIMIT 1
-      `,
-      args:[telegramId]
-    });
-
-    res.json({
-      ok:true,
-      user:result.rows[0]
-    });
-
-  }catch(e){
-
-    console.error('USER ERROR',e);
-
-    res.status(500).json({
-      error:'User request failed'
-    });
-
-  }
-
-});
-
-/* =========================================================
-   TAP
-========================================================= */
-
-app.post('/api/tap',async(req,res)=>{
-
-  try{
-
-    const telegramId=auth(req);
-
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
+      await db.execute({
+        sql: `
+          INSERT INTO daily_rewards
+          (
+            telegram_id,
+            day,
+            reward,
+            claimed_at
+          )
+          VALUES (?, ?, ?, ?)
+        `,
+        args: [
+          telegramId,
+          day,
+          reward,
+          now()
+        ]
       });
 
-    const result=await db.execute({
-      sql:`
-        UPDATE users
-        SET
-          balance=balance+1,
-          energy=energy-1
-        WHERE telegram_id=?
-        AND energy>0
-      `,
-      args:[telegramId]
-    });
 
-    if(result.rowsAffected===0)
-      return res.status(400).json({
-        error:'Not enough energy'
-      });
-
-    const user=await db.execute({
-      sql:`
-        SELECT *
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
-
-    res.json({
-      ok:true,
-      user:user.rows[0]
-    });
-
-  }catch(e){
-
-    console.error('TAP ERROR',e);
-
-    res.status(500).json({
-      error:'Tap failed'
-    });
-
-  }
-
-});
-
-/* =========================================================
-   TASKS
-========================================================= */
-
-app.get('/api/tasks',async(req,res)=>{
-
-  try{
-
-    const telegramId=auth(req);
-
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
-      });
-
-    const claims=await db.execute({
-      sql:`
-        SELECT task_id
-        FROM task_claims
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
-
-    const completed=new Set(
-      claims.rows.map(x=>x.task_id)
-    );
-
-    const tasks=Object.values(TASKS).map(t=>({
-
-      ...t,
-
-      completed:completed.has(t.id),
-
-      action:
-        t.id==='channel'||
-        t.id==='group'
-        ?'Verify'
-        :'Check'
-
-    }));
-
-    res.json({
-      ok:true,
-      tasks
-    });
-
-  }catch(e){
-
-    console.error(e);
-
-    res.status(500).json({
-      error:'Tasks failed'
-    });
-
-  }
-
-});
-
-/* =========================================================
-   CLAIM TASK
-========================================================= */
-
-app.post('/api/tasks/claim',async(req,res)=>{
-
-  try{
-
-    const telegramId=auth(req);
-
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
-      });
-
-    const taskId=String(
-      req.body.task_id||''
-    );
-
-    const task=TASKS[taskId];
-
-    if(!task)
-      return res.status(404).json({
-        error:'Task not found'
-      });
-
-    const already=await db.execute({
-      sql:`
-        SELECT id
-        FROM task_claims
-        WHERE telegram_id=?
-        AND task_id=?
-        LIMIT 1
-      `,
-      args:[
+      await addTransaction(
         telegramId,
-        taskId
-      ]
-    });
-
-    if(already.rows.length)
-      return res.status(400).json({
-        error:'Task already completed'
-      });
-
-    let verified=false;
-
-    if(taskId==='channel'||taskId==='group'){
-
-      const member=await telegram(
-        'getChatMember',
-        {
-          chat_id:task.chat,
-          user_id:telegramId
-        }
+        "DAILY",
+        reward,
+        "Completed",
+        `Day ${day}`
       );
 
-      verified=
-        ['creator','administrator','member']
-          .includes(member.status);
 
-    }else if(taskId==='holder'){
-
-      verified=
-        await checkSnpBalance(
-          req.body.wallet_address||
-          ''
+      const updated =
+        await getUser(
+          telegramId
         );
 
-    }else if(taskId==='twitter'){
 
-      return res.status(400).json({
-        error:'X verification is not configured yet'
-      });
+      res.json({
 
-    }
+        ok: true,
 
-    if(!verified){
+        day,
 
-      return res.status(400).json({
-        error:
-          'Task not verified. Please complete it and try again.'
-      });
-
-    }
-
-    await db.execute({
-      sql:`
-        INSERT INTO task_claims
-        (telegram_id,task_id,reward)
-        VALUES(?,?,?)
-      `,
-      args:[
-        telegramId,
-        taskId,
-        task.reward
-      ]
-    });
-
-    await rewardUser(
-      telegramId,
-      task.reward,
-      'TASK_REWARD',
-      task.title
-    );
-
-    const user=await db.execute({
-      sql:`
-        SELECT balance
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
-
-    res.json({
-      ok:true,
-      reward:task.reward,
-      balance:user.rows[0].balance
-    });
-
-  }catch(e){
-
-    console.error('TASK ERROR',e);
-
-    res.status(400).json({
-      error:
-        'Verification failed. Please try again.'
-    });
-
-  }
-
-});
-
-/* =========================================================
-   DAILY STATUS
-========================================================= */
-
-app.get('/api/daily/status',async(req,res)=>{
-
-  try{
-
-    const telegramId=auth(req);
-
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
-      });
-
-    const u=await db.execute({
-      sql:`
-        SELECT
-          daily_streak,
-          last_daily_bonus
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
-
-    const user=u.rows[0];
-
-    const today=new Date()
-      .toISOString()
-      .slice(0,10);
-
-    let day=Number(
-      user?.daily_streak||0
-    );
-
-    if(day<1)day=1;
-
-    if(user?.last_daily_bonus===today){
-
-      return res.json({
-        ok:true,
-        current_day:day,
-        claimed:true
-      });
-
-    }
-
-    res.json({
-      ok:true,
-      current_day:day,
-      claimed:false
-    });
-
-  }catch(e){
-
-    res.status(500).json({
-      error:'Daily status failed'
-    });
-
-  }
-
-});
-
-/* =========================================================
-   DAILY CLAIM
-========================================================= */
-
-app.post('/api/daily/claim',async(req,res)=>{
-
-  try{
-
-    const telegramId=auth(req);
-
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
-      });
-
-    const result=await db.execute({
-      sql:`
-        SELECT
-          daily_streak,
-          last_daily_bonus
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
-
-    if(!result.rows.length)
-      return res.status(404).json({
-        error:'User not found'
-      });
-
-    const u=result.rows[0];
-
-    const today=new Date()
-      .toISOString()
-      .slice(0,10);
-
-    if(u.last_daily_bonus===today)
-      return res.status(400).json({
-        error:'Daily reward already claimed'
-      });
-
-    let streak=Number(
-      u.daily_streak||0
-    );
-
-    if(streak<1)
-      streak=1;
-    else
-      streak++;
-
-    if(streak>30)
-      streak=1;
-
-    const reward=streak*10;
-
-    await db.execute({
-      sql:`
-        UPDATE users
-        SET
-          balance=balance+?,
-          daily_streak=?,
-          last_daily_bonus=?
-        WHERE telegram_id=?
-      `,
-      args:[
         reward,
-        streak,
-        today,
-        telegramId
-      ]
-    });
 
-    await addTransaction(
-      telegramId,
-      'DAILY_REWARD',
-      reward,
-      `Day ${streak}`
-    );
+        balance:
+          Number(
+            updated.balance || 0
+          )
 
-    const user=await db.execute({
-      sql:`
-        SELECT balance
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
+      });
 
-    res.json({
-      ok:true,
-      reward,
-      day:streak,
-      balance:user.rows[0].balance
-    });
 
-  }catch(e){
+    } catch (error) {
 
-    console.error('DAILY ERROR',e);
+      console.error(
+        "/api/daily/claim",
+        error
+      );
 
-    res.status(500).json({
-      error:'Daily reward failed'
-    });
 
+      res
+        .status(500)
+        .json({
+          error:
+            "Daily claim failed"
+        });
+    }
   }
+);
 
-});
 
-/* =========================================================
-   FRIENDS
-========================================================= */
+// ============================================================
+// WALLET
+// ============================================================
 
-app.get('/api/friends',async(req,res)=>{
+app.post(
+  "/api/wallet/connect",
+  async (req, res) => {
 
-  try{
+    try {
 
-    const telegramId=auth(req);
+      const verified =
+        auth(req);
 
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const wallet =
+        String(
+          req.body.wallet_address ||
+          ""
+        ).trim();
+
+
+      if (
+        wallet.length < 20
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Invalid wallet"
+          });
+      }
+
+
+      await db.execute({
+        sql: `
+          UPDATE users
+          SET wallet_address = ?
+          WHERE telegram_id = ?
+        `,
+        args: [
+          wallet,
+          verified.id
+        ]
       });
 
-    const me=await db.execute({
-      sql:`
-        SELECT referral_code
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
 
-    const friends=await db.execute({
-      sql:`
-        SELECT
-          username,
-          balance,
-          created_at
-        FROM users
-        WHERE referred_by=?
-        ORDER BY created_at DESC
-      `,
-      args:[telegramId]
-    });
+      res.json({
 
-    res.json({
-      ok:true,
-      referral_code:
-        me.rows[0]?.referral_code||'',
-      count:friends.rows.length,
-      friends:friends.rows
-    });
+        ok: true,
 
-  }catch(e){
+        wallet_address:
+          wallet
 
-    res.status(500).json({
-      error:'Friends failed'
-    });
+      });
 
+
+    } catch (error) {
+
+      console.error(
+        "/api/wallet/connect",
+        error
+      );
+
+
+      res
+        .status(500)
+        .json({
+          error:
+            "Wallet save failed"
+        });
+    }
   }
+);
 
-});
 
-/* =========================================================
-   HISTORY
-========================================================= */
+app.post(
+  "/api/wallet/get",
+  async (req, res) => {
 
-app.get('/api/history',async(req,res)=>{
+    try {
 
-  try{
+      const verified =
+        auth(req);
 
-    const telegramId=auth(req);
 
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const user =
+        await getUser(
+          verified.id
+        );
+
+
+      res.json({
+
+        ok: true,
+
+        wallet_address:
+          user?.wallet_address ||
+          null
+
       });
 
-    const result=await db.execute({
-      sql:`
-        SELECT *
-        FROM transactions
-        WHERE telegram_id=?
-        ORDER BY id DESC
-        LIMIT 100
-      `,
-      args:[telegramId]
-    });
 
-    res.json({
-      ok:true,
-      transactions:result.rows
-    });
+    } catch (error) {
 
-  }catch(e){
-
-    res.status(500).json({
-      error:'History failed'
-    });
-
+      res
+        .status(500)
+        .json({
+          error:
+            "Wallet lookup failed"
+        });
+    }
   }
+);
 
-});
 
-/* =========================================================
-   WALLET CONNECT
-========================================================= */
+// ============================================================
+// TASKS
+// ============================================================
 
-app.post('/api/wallet/connect',async(req,res)=>{
+app.get(
+  "/api/tasks",
+  async (req, res) => {
 
-  try{
+    try {
 
-    const telegramId=auth(req);
+      const verified =
+        auth(req);
 
-    const wallet=String(
-      req.body.wallet_address||''
-    ).trim();
 
-    if(!telegramId||!wallet)
-      return res.status(400).json({
-        error:'Invalid wallet'
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const result =
+        await db.execute({
+          sql: `
+            SELECT task_id
+            FROM task_claims
+            WHERE telegram_id = ?
+          `,
+          args: [
+            verified.id
+          ]
+        });
+
+
+      const claimed =
+        new Set(
+          result.rows.map(
+            row =>
+              String(
+                row.task_id
+              )
+          )
+        );
+
+
+      res.json({
+
+        ok: true,
+
+        tasks:
+          TASKS.map(
+            task => ({
+              ...task,
+              completed:
+                claimed.has(
+                  task.id
+                )
+            })
+          )
+
       });
 
-    await db.execute({
-      sql:`
-        UPDATE users
-        SET wallet_address=?
-        WHERE telegram_id=?
-      `,
-      args:[
-        wallet,
-        telegramId
-      ]
-    });
 
-    res.json({
-      ok:true,
-      wallet_address:wallet
-    });
+    } catch (error) {
 
-  }catch(e){
-
-    res.status(500).json({
-      error:'Wallet save failed'
-    });
-
+      res
+        .status(500)
+        .json({
+          error:
+            "Tasks failed"
+        });
+    }
   }
+);
 
-});
 
-/* =========================================================
-   WALLET GET
-========================================================= */
+// ============================================================
+// FRIENDS
+// ============================================================
 
-app.post('/api/wallet/get',async(req,res)=>{
+app.get(
+  "/api/friends",
+  async (req, res) => {
 
-  try{
+    try {
 
-    const telegramId=auth(req);
+      const verified =
+        auth(req);
 
-    if(!telegramId)
-      return res.status(401).json({
-        error:'Unauthorized'
+
+      if (!verified?.id) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const user =
+        await getUser(
+          verified.id
+        );
+
+
+      const result =
+        await db.execute({
+          sql: `
+            SELECT
+              telegram_id,
+              username,
+              created_at
+            FROM users
+            WHERE referred_by = ?
+            ORDER BY created_at DESC
+          `,
+          args: [
+            verified.id
+          ]
+        });
+
+
+      res.json({
+
+        ok: true,
+
+        referral_code:
+          user?.referral_code ||
+          "",
+
+        referral_link:
+          `https://t.me/SNPCOINBot?startapp=${user?.referral_code || ""}`,
+
+        friends:
+          result.rows
+
       });
 
-    const r=await db.execute({
-      sql:`
-        SELECT wallet_address
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
 
-    res.json({
-      ok:true,
-      wallet_address:
-        r.rows[0]?.wallet_address||null
-    });
+    } catch (error) {
 
-  }catch(e){
-
-    res.status(500).json({
-      error:'Wallet lookup failed'
-    });
-
+      res
+        .status(500)
+        .json({
+          error:
+            "Friends failed"
+        });
+    }
   }
+);
 
-});
 
-/* =========================================================
-   WITHDRAW CREATE
-========================================================= */
+// ============================================================
+// HISTORY
+// ============================================================
 
-app.post('/api/withdraw/create',async(req,res)=>{
+app.get(
+  "/api/history",
+  async (req, res) => {
 
-  try{
+    try {
 
-    const telegramId=auth(req);
+      const verified =
+        auth(req);
 
-    const wallet=String(
-      req.body.wallet_address||''
-    ).trim();
 
-    const amount=Number(
-      req.body.amount||0
-    );
+      if (!verified?.id) {
 
-    if(!telegramId||!wallet||!Number.isSafeInteger(amount)||amount<=0)
-      return res.status(400).json({
-        error:'Invalid withdrawal'
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized"
+          });
+      }
+
+
+      const result =
+        await db.execute({
+          sql: `
+            SELECT *
+            FROM transactions
+            WHERE telegram_id = ?
+            ORDER BY id DESC
+            LIMIT 100
+          `,
+          args: [
+            verified.id
+          ]
+        });
+
+
+      res.json({
+
+        ok: true,
+
+        history:
+          result.rows
+
       });
 
-    const u=await db.execute({
-      sql:`
-        SELECT *
-        FROM users
-        WHERE telegram_id=?
-      `,
-      args:[telegramId]
-    });
 
-    if(!u.rows.length)
-      return res.status(404).json({
-        error:'User not found'
-      });
+    } catch (error) {
 
-    const user=u.rows[0];
-
-    if(amount>Number(user.balance))
-      return res.status(400).json({
-        error:'Insufficient SNP balance'
-      });
-
-    const id=
-      'SNP-'+
-      Date.now().toString(36).toUpperCase()+
-      '-'+
-      crypto.randomBytes(4)
-        .toString('hex')
-        .toUpperCase();
-
-    await db.execute({
-      sql:`
-        INSERT INTO withdrawals
-        (
-          withdrawal_id,
-          telegram_id,
-          wallet_address,
-          amount,
-          fee_ton,
-          fee_nano,
-          treasury_wallet,
-          token_contract,
-          status
-        )
-        VALUES(?,?,?,?,0.1,?,?,?,'payment_pending')
-      `,
-      args:[
-        id,
-        telegramId,
-        wallet,
-        amount,
-        FEE_NANO,
-        TREASURY_WALLET,
-        SNP_CONTRACT
-      ]
-    });
-
-    await addTransaction(
-      telegramId,
-      'WITHDRAWAL',
-      -amount,
-      'Processing',
-      id
-    );
-
-    res.json({
-      ok:true,
-      withdrawal_id:id,
-      amount,
-      fee_nano:FEE_NANO,
-      treasury_wallet:TREASURY_WALLET,
-      token_contract:SNP_CONTRACT,
-      status:'payment_pending'
-    });
-
-  }catch(e){
-
-    console.error('WITHDRAW CREATE',e);
-
-    res.status(500).json({
-      error:'Withdrawal creation failed'
-    });
-
+      res
+        .status(500)
+        .json({
+          error:
+            "History failed"
+        });
+    }
   }
+);
 
-});
 
-/* =========================================================
-   WITHDRAW VERIFY
-========================================================= */
+// ============================================================
+// START SERVER
+// ============================================================
 
-app.post('/api/withdraw/verify',async(req,res)=>{
+async function start() {
 
-  try{
+  try {
 
-    const telegramId=auth(req);
+    await initDB();
 
-    const id=String(
-      req.body.withdrawal_id||''
-    ).trim();
 
-    if(!telegramId||!id)
-      return res.status(400).json({
-        error:'Invalid withdrawal'
-      });
+    app.listen(
+      PORT,
+      () => {
 
-    const r=await db.execute({
-      sql:`
-        SELECT *
-        FROM withdrawals
-        WHERE withdrawal_id=?
-        AND telegram_id=?
-      `,
-      args:[
-        id,
-        telegramId
-      ]
-    });
+        console.log(
+          `SINAPS backend running on ${PORT}`
+        );
 
-    if(!r.rows.length)
-      return res.status(404).json({
-        error:'Withdrawal not found'
-      });
-
-    res.json({
-      ok:true,
-      status:r.rows[0].status,
-      withdrawal:r.rows[0]
-    });
-
-  }catch(e){
-
-    res.status(500).json({
-      error:'Verification failed'
-    });
-
-  }
-
-});
-
-/* =========================================================
-   SNP BALANCE CHECK
-========================================================= */
-
-async function checkSnpBalance(wallet){
-
-  if(!wallet)
-    return false;
-
-  try{
-
-    const url=
-      TONCENTER+
-      '/jetton/wallets?address='+
-      encodeURIComponent(wallet)+
-      '&jetton_address='+
-      encodeURIComponent(SNP_CONTRACT);
-
-    const r=await fetch(
-      url,
-      {
-        headers:
-          TONCENTER_API_KEY
-          ? {'X-API-Key':TONCENTER_API_KEY}
-          : {}
       }
     );
 
-    if(!r.ok)return false;
 
-    const d=await r.json();
-
-    const rows=
-      d.jetton_wallets||
-      d.wallets||
-      d.result||
-      [];
-
-    for(const x of rows){
-
-      const raw=
-        Number(
-          x.balance||
-          x.jetton_balance||
-          0
-        );
-
-      if(raw>=50000*1e9)
-        return true;
-
-    }
-
-    return false;
-
-  }catch(e){
+  } catch (error) {
 
     console.error(
-      'SNP BALANCE CHECK',
-      e
-    );
-
-    return false;
-  }
-
-}
-
-/* =========================================================
-   START
-========================================================= */
-
-async function start(){
-
-  try{
-
-    await initDatabase();
-
-    app.listen(PORT,()=>{
-      console.log(
-        `SINAPS backend running on port ${PORT}`
-      );
-    });
-
-  }catch(e){
-
-    console.error(
-      'STARTUP ERROR',
-      e
+      "Startup error:",
+      error
     );
 
     process.exit(1);
   }
-
 }
+
 
 start();
