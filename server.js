@@ -127,7 +127,8 @@ function publicUser(user) {
     balance: Number(user.balance || 0), energy: Number(user.energy || 0), max_energy: Number(user.max_energy || 1000),
     tap_power: Number(user.tap_power || 1), tap_boost_level: Number(user.tap_boost_level || 1),
     energy_boost_level: Number(user.energy_boost_level || 1), recharge_multiplier: Number(user.recharge_multiplier || 1),
-    recharge_level: Number(user.recharge_level || 1), wallet_address: user.wallet_address || null, referral_code: user.referral_code || ""
+    recharge_level: Number(user.recharge_level || 1), wallet_address: user.wallet_address || null, referral_code: user.referral_code || "",
+    referral_rewarded: Number(user.referral_rewarded || 0)
   };
 }
 async function addTransaction(telegramId, type, amount, status, details) {
@@ -150,12 +151,28 @@ async function syncEnergy(telegramId) {
 }
 async function rewardReferralOwner(telegramId, rewardAmount, source) {
   const user = await getUser(telegramId);
-  if (!user?.referred_by || Number(rewardAmount) <= 0) return 0;
+  // A referral only becomes active after the invited user connects a TON wallet.
+  if (!user?.referred_by || !user?.wallet_address || Number(rewardAmount) <= 0) return 0;
   const bonus = Math.floor(Number(rewardAmount) * REFERRAL_RATE);
   if (bonus <= 0) return 0;
   const r = await db.execute({ sql: `UPDATE users SET balance=balance+? WHERE telegram_id=?`, args: [bonus, String(user.referred_by)] });
   if (r.rowsAffected) await addTransaction(user.referred_by, "REFERRAL", bonus, "Completed", `${source} referral bonus`);
   return bonus;
+}
+
+async function qualifyReferral(telegramId) {
+  const user = await getUser(telegramId);
+  if (!user?.referred_by || !user?.wallet_address || Number(user.referral_rewarded || 0) === 1) return 0;
+  const changed = await db.execute({
+    sql: `UPDATE users SET referral_rewarded=1 WHERE telegram_id=? AND referred_by IS NOT NULL AND wallet_address IS NOT NULL AND referral_rewarded=0`,
+    args: [String(telegramId)]
+  });
+  if (!changed.rowsAffected) return 0;
+  const referrer = await getUser(user.referred_by);
+  if (!referrer) return 0;
+  await db.execute({ sql: `UPDATE users SET balance=balance+? WHERE telegram_id=?`, args: [REFERRAL_JOIN_REWARD, String(user.referred_by)] });
+  await addTransaction(user.referred_by, "REFERRAL", REFERRAL_JOIN_REWARD, "Completed", `Wallet-connected referral: ${telegramId}`);
+  return REFERRAL_JOIN_REWARD;
 }
 async function rewardUser(telegramId, amount, type, details) {
   await db.execute({ sql: `UPDATE users SET balance=balance+? WHERE telegram_id=?`, args: [Number(amount), String(telegramId)] });
@@ -199,6 +216,9 @@ async function initDB() {
   await ensureColumn("users", "energy_boost_level", "INTEGER DEFAULT 1");
   await ensureColumn("users", "recharge_multiplier", "INTEGER DEFAULT 1");
   await ensureColumn("users", "recharge_level", "INTEGER DEFAULT 1");
+  await ensureColumn("users", "referral_rewarded", "INTEGER DEFAULT 0");
+  // Existing users created by older versions may already have received the 100 SNP join reward.
+  await db.execute(`UPDATE users SET referral_rewarded=1 WHERE referred_by IS NOT NULL AND EXISTS (SELECT 1 FROM transactions t WHERE t.telegram_id=users.referred_by AND t.type='REFERRAL' AND t.details LIKE '%New SINAPS referral%')`);
   console.log("Database ready");
 }
 
@@ -232,7 +252,7 @@ async function checkSnpBalance(wallet) {
 // ============================================================
 // ROOT
 // ============================================================
-app.get("/", (req, res) => res.json({ project: "SINAPS", status: "online", version: "4.0.0" }));
+app.get("/", (req, res) => res.json({ project: "SINAPS", status: "online", version: "4.1.0" }));
 
 // ============================================================
 // USER / REFERRAL
@@ -254,10 +274,6 @@ app.post("/api/user", async (req, res) => {
       }
       await db.execute({ sql: `INSERT INTO users (telegram_id,username,balance,energy,max_energy,last_energy_update,created_at,last_daily_bonus,daily_streak,referral_code,referred_by,tap_power,tap_boost_level,energy_boost_level,recharge_multiplier,recharge_level) VALUES (?,?,0,1000,1000,?,?,NULL,0,?,?,1,1,1,1,1)`, args: [telegramId, username, now(), now(), referralCode, referredBy] });
       user = await getUser(telegramId);
-      if (referredBy) {
-        await db.execute({ sql: `UPDATE users SET balance=balance+? WHERE telegram_id=?`, args: [REFERRAL_JOIN_REWARD, referredBy] });
-        await addTransaction(referredBy, "REFERRAL", REFERRAL_JOIN_REWARD, "Completed", "New SINAPS referral");
-      }
     } else {
       await db.execute({ sql: `UPDATE users SET username=? WHERE telegram_id=?`, args: [username, telegramId] });
     }
@@ -351,7 +367,8 @@ app.get("/api/daily/status", async (req, res) => {
     else if (last && dayDifference(last, today) === 1) nextDay = Number(user.daily_streak || 0) + 1;
     if (nextDay > 30) nextDay = 1;
     const streak = Number(user.daily_streak || 0);
-    const claimedDays = (!claimedToday && nextDay === 1) ? [] : Array.from({ length: Math.max(0, Math.min(30, claimedToday ? streak - 1 : nextDay - 1)) }, (_, i) => i + 1);
+    const claimedThrough = claimedToday ? Math.min(30, streak) : (last && dayDifference(last, today) === 1 ? Math.max(0, nextDay - 1) : 0);
+    const claimedDays = Array.from({ length: claimedThrough }, (_, i) => i + 1);
     res.json({ ok: true, claimedToday, currentDay: streak, nextDay, reward: nextDay * 10, claimedDays });
   } catch (e) { console.error("/api/daily/status", e); res.status(500).json({ error: "Daily status failed" }); }
 });
@@ -383,9 +400,11 @@ app.post("/api/wallet/connect", async (req, res) => {
   try {
     const verified = requireAuth(req, res); if (!verified) return;
     const wallet = String(req.body.wallet_address || "").trim();
-    if (wallet.length < 20 || wallet.length > 150) return res.status(400).json({ error: "Invalid wallet" });
+    if (wallet.length < 20 || wallet.length > 150) return res.status(400).json({ error: "Invalid TON wallet" });
     await db.execute({ sql: `UPDATE users SET wallet_address=? WHERE telegram_id=?`, args: [wallet, verified.id] });
-    res.json({ ok: true, wallet_address: wallet });
+    const referralReward = await qualifyReferral(verified.id);
+    const user = await getUser(verified.id);
+    res.json({ ok: true, wallet_address: wallet, referral_reward: referralReward, user: publicUser(user) });
   } catch (e) { console.error("/api/wallet/connect", e); res.status(500).json({ error: "Wallet save failed" }); }
 });
 app.post("/api/wallet/disconnect", async (req, res) => {
@@ -451,17 +470,30 @@ app.get("/api/friends", async (req, res) => {
   try {
     const verified = requireAuth(req, res); if (!verified) return;
     const user = await getUser(verified.id);
-    const friends = await db.execute({ sql: `SELECT telegram_id,username,created_at FROM users WHERE referred_by=? ORDER BY created_at DESC`, args: [verified.id] });
+    const friends = await db.execute({
+      sql: `SELECT telegram_id,username,created_at,balance,wallet_address,referral_rewarded FROM users WHERE referred_by=? ORDER BY created_at DESC`,
+      args: [verified.id]
+    });
     const earnings = await db.execute({ sql: `SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE telegram_id=? AND type='REFERRAL' AND amount>0`, args: [verified.id] });
     const code = user?.referral_code || "";
+    const mapped = friends.rows.map(f => ({
+      telegram_id: String(f.telegram_id),
+      username: f.username || "",
+      created_at: f.created_at,
+      balance: Number(f.balance || 0),
+      wallet_connected: Boolean(f.wallet_address),
+      referral_rewarded: Number(f.referral_rewarded || 0) === 1,
+      status: f.wallet_address ? "ACTIVE" : "CONNECT WALLET"
+    }));
     res.json({
       ok: true, referral_code: code,
       referral_link: `https://t.me/${BOT_USERNAME}?startapp=${encodeURIComponent(code)}`,
-      total_friends: friends.rows.length,
+      total_friends: mapped.length,
+      active_referrals: mapped.filter(f => f.wallet_connected).length,
       total_earnings: Number(earnings.rows[0]?.total || 0),
       invite_reward: REFERRAL_JOIN_REWARD,
       referral_rate: REFERRAL_RATE,
-      friends: friends.rows
+      friends: mapped
     });
   } catch (e) { console.error("/api/friends", e); res.status(500).json({ error: "Friends failed" }); }
 });
@@ -542,7 +574,7 @@ app.post("/api/withdraw/cancel", async (req, res) => {
 async function start() {
   try {
     await initDB();
-    app.listen(PORT, () => console.log(`SINAPS backend v4.0.0 running on ${PORT}`));
+    app.listen(PORT, () => console.log(`SINAPS backend v4.1.0 running on ${PORT}`));
   } catch (e) { console.error("Startup error:", e); process.exit(1); }
 }
 start();
