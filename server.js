@@ -1,47 +1,202 @@
-const express = require("express");
-const cors = require("cors");
-const crypto = require("crypto");
-const { createClient } = require("@libsql/client");
+const express = require('express');
+const cors = require('cors');
+const crypto = require('crypto');
+const { createClient } = require('@libsql/client');
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit:'1mb' }));
 
-const PORT = process.env.PORT || 10000;
+const PORT=process.env.PORT||10000;
 
-const TURSO_DATABASE_URL = process.env.TURSO_DATABASE_URL;
-const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN;
+const DB_URL=process.env.TURSO_DATABASE_URL;
+const DB_TOKEN=process.env.TURSO_AUTH_TOKEN;
 
-const TREASURY_WALLET =
-  process.env.TREASURY_WALLET ||
-  "UQDMsJu14wu-EHSjaRpufQdPb73pKVRkQvHNezgA2zF69sJX";
+const BOT_TOKEN=process.env.TELEGRAM_BOT_TOKEN||'';
 
-const SNP_CONTRACT =
-  "EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls";
+const TREASURY_WALLET=
+  process.env.TREASURY_WALLET||
+  'UQDMsJu14wu-EHSjaRpufQdPb73pKVRkQvHNezgA2zF69sJX';
 
-const WITHDRAW_FEE_NANO = "100000000";
+const SNP_CONTRACT=
+  'EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls';
 
-if (!TURSO_DATABASE_URL || !TURSO_AUTH_TOKEN) {
+const TONCENTER_API_KEY=
+  process.env.TONCENTER_API_KEY||'';
+
+const TONCENTER='https://toncenter.com/api/v3';
+
+const FEE_NANO='100000000';
+
+const REFERRAL_RATE=0.15;
+
+const TASKS={
+
+  channel:{
+    id:'channel',
+    title:'Join SINAPS Channel',
+    reward:100,
+    icon:'📢',
+    url:'https://t.me/SINAPS_COIN',
+    chat:'@SINAPS_COIN'
+  },
+
+  group:{
+    id:'group',
+    title:'Join SINAPS Group',
+    reward:70,
+    icon:'👥',
+    url:'https://t.me/SINAPS_Group',
+    chat:'@SINAPS_Group'
+  },
+
+  twitter:{
+    id:'twitter',
+    title:'Follow SINAPS on X',
+    reward:50,
+    icon:'𝕏',
+    url:'https://x.com/SINAPS_SNP'
+  },
+
+  holder:{
+    id:'holder',
+    title:'Hold 50,000 SNP',
+    reward:1000,
+    icon:'💎',
+    url:'#'
+  }
+
+};
+
+if(!DB_URL||!DB_TOKEN){
+
   console.error(
-    "Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN"
+    'Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN'
   );
 
   process.exit(1);
 }
 
-const db = createClient({
-  url: TURSO_DATABASE_URL,
-  authToken: TURSO_AUTH_TOKEN
+const db=createClient({
+  url:DB_URL,
+  authToken:DB_TOKEN
 });
+
+/* =========================================================
+   TELEGRAM AUTH
+========================================================= */
+
+function verifyTelegram(initData){
+
+  if(!BOT_TOKEN||!initData)
+    return null;
+
+  try{
+
+    const params=new URLSearchParams(initData);
+
+    const hash=params.get('hash');
+
+    if(!hash)return null;
+
+    params.delete('hash');
+
+    const dataCheck=Array
+      .from(params.entries())
+      .sort(([a],[b])=>a.localeCompare(b))
+      .map(([k,v])=>`${k}=${v}`)
+      .join('\n');
+
+    const secret=crypto
+      .createHmac('sha256','WebAppData')
+      .update(BOT_TOKEN)
+      .digest();
+
+    const calculated=crypto
+      .createHmac('sha256',secret)
+      .update(dataCheck)
+      .digest('hex');
+
+    if(calculated!==hash)
+      return null;
+
+    const authDate=Number(params.get('auth_date')||0);
+
+    if(Date.now()/1000-authDate>86400)
+      return null;
+
+    const telegramUser=
+      JSON.parse(params.get('user')||'{}');
+
+    return telegramUser;
+
+  }catch{
+
+    return null;
+  }
+}
+
+function auth(req){
+
+  const header=req.headers['x-telegram-init-data'];
+
+  const verified=verifyTelegram(header||'');
+
+  if(verified?.id)
+    return Number(verified.id);
+
+  return null;
+}
+
+function normalizeId(value){
+
+  const n=Number(value);
+
+  if(!Number.isSafeInteger(n)||n<=0)
+    return null;
+
+  return n;
+}
+
+/* =========================================================
+   TELEGRAM API
+========================================================= */
+
+async function telegram(method,params={}){
+
+  if(!BOT_TOKEN)
+    throw new Error('TELEGRAM_BOT_TOKEN is missing');
+
+  const r=await fetch(
+    `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
+    {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json'
+      },
+      body:JSON.stringify(params)
+    }
+  );
+
+  const d=await r.json();
+
+  if(!d.ok)
+    throw new Error(
+      d.description||'Telegram API error'
+    );
+
+  return d.result;
+}
 
 /* =========================================================
    DATABASE
 ========================================================= */
 
-async function initDatabase() {
+async function initDatabase(){
+
   await db.execute(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS users(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_id INTEGER NOT NULL UNIQUE,
       username TEXT DEFAULT '',
@@ -51,12 +206,50 @@ async function initDatabase() {
       last_energy_update TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       last_daily_bonus TEXT,
+      daily_streak INTEGER NOT NULL DEFAULT 0,
+      referral_code TEXT UNIQUE,
+      referred_by INTEGER,
       wallet_address TEXT
     )
   `);
 
   await db.execute(`
-    CREATE TABLE IF NOT EXISTS withdrawals (
+    CREATE TABLE IF NOT EXISTS task_claims(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id INTEGER NOT NULL,
+      task_id TEXT NOT NULL,
+      reward INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'completed',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(telegram_id,task_id)
+    )
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS daily_rewards(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id INTEGER NOT NULL,
+      day INTEGER NOT NULL,
+      reward INTEGER NOT NULL,
+      claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(telegram_id,day)
+    )
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS transactions(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      amount INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'completed',
+      details TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS withdrawals(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       withdrawal_id TEXT NOT NULL UNIQUE,
       telegram_id INTEGER NOT NULL,
@@ -76,197 +269,143 @@ async function initDatabase() {
   `);
 
   await db.execute(`
-    CREATE INDEX IF NOT EXISTS users_telegram_id_idx
-    ON users (telegram_id)
+    CREATE INDEX IF NOT EXISTS tx_user_idx
+    ON transactions(telegram_id)
   `);
 
   await db.execute(`
-    CREATE INDEX IF NOT EXISTS withdrawals_telegram_id_idx
-    ON withdrawals (telegram_id)
+    CREATE INDEX IF NOT EXISTS task_user_idx
+    ON task_claims(telegram_id)
   `);
 
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS withdrawals_status_idx
-    ON withdrawals (status)
-  `);
+  console.log('Database initialized');
 
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS withdrawals_fee_tx_hash_idx
-    ON withdrawals (fee_tx_hash)
-  `);
-
-  console.log("Database initialized");
 }
 
 /* =========================================================
    HELPERS
 ========================================================= */
 
-function normalizeTelegramId(value) {
-  const n = Number(value);
+function referralCode(){
 
-  if (!Number.isSafeInteger(n) || n <= 0) {
-    return null;
-  }
+  return 'SNP-'+
+    crypto.randomBytes(4)
+      .toString('hex')
+      .toUpperCase();
 
-  return n;
 }
 
-function normalizeAmount(value) {
-  const n = Number(value);
+async function addTransaction(
+  telegramId,
+  type,
+  amount,
+  status,
+  details=''
+){
 
-  if (!Number.isSafeInteger(n) || n <= 0) {
-    return null;
-  }
-
-  return n;
-}
-
-function nowISO() {
-  return new Date().toISOString();
-}
-
-/* =========================================================
-   ENERGY REGEN
-========================================================= */
-
-/*
- * هر 3 ثانیه:
- * +1 Energy
- *
- * حداکثر:
- * max_energy
- */
-
-async function regenerateEnergy(telegramId) {
   await db.execute({
-    sql: `
-      UPDATE users
-      SET
-        energy =
-          MIN(
-            max_energy,
-            energy +
-            CAST(
-              (
-                strftime('%s', 'now') -
-                strftime(
-                  '%s',
-                  COALESCE(
-                    last_energy_update,
-                    created_at
-                  )
-                )
-              ) / 3
-              AS INTEGER
-            )
-          ),
-
-        last_energy_update =
-          CASE
-            WHEN
-              energy +
-              CAST(
-                (
-                  strftime('%s', 'now') -
-                  strftime(
-                    '%s',
-                    COALESCE(
-                      last_energy_update,
-                      created_at
-                    )
-                  )
-                ) / 3
-                AS INTEGER
-              ) >= max_energy
-
-            THEN datetime('now')
-
-            ELSE datetime(
-              COALESCE(
-                last_energy_update,
-                created_at
-              ),
-              '+' ||
-              (
-                CAST(
-                  (
-                    strftime('%s', 'now') -
-                    strftime(
-                      '%s',
-                      COALESCE(
-                        last_energy_update,
-                        created_at
-                      )
-                    )
-                  ) / 3
-                  AS INTEGER
-                ) * 3
-              ) ||
-              ' seconds'
-            )
-          END
-
-      WHERE telegram_id = ?
+    sql:`
+      INSERT INTO transactions
+      (telegram_id,type,amount,status,details)
+      VALUES(?,?,?,?,?)
     `,
-    args: [telegramId]
+    args:[
+      telegramId,
+      type,
+      amount,
+      status,
+      details
+    ]
   });
+
+}
+
+async function rewardUser(
+  telegramId,
+  amount,
+  type,
+  details=''
+){
+
+  await db.execute({
+    sql:`
+      UPDATE users
+      SET balance=balance+?
+      WHERE telegram_id=?
+    `,
+    args:[
+      amount,
+      telegramId
+    ]
+  });
+
+  await addTransaction(
+    telegramId,
+    type,
+    amount,
+    'completed',
+    details
+  );
+
 }
 
 /* =========================================================
    HEALTH
 ========================================================= */
 
-app.get("/", async (req, res) => {
+app.get('/',(req,res)=>{
+
   res.json({
-    ok: true,
-    service: "SINAPS backend",
-    database: "Turso",
-    status: "online"
+    ok:true,
+    service:'SINAPS backend',
+    database:'Turso',
+    status:'online'
   });
+
 });
 
 /* =========================================================
    USER
 ========================================================= */
 
-app.post("/api/user", async (req, res) => {
-  try {
-    const telegramId =
-      normalizeTelegramId(
-        req.body.telegram_id
-      );
+app.post('/api/user',async(req,res)=>{
 
-    const username =
-      String(
-        req.body.username || ""
-      );
+  try{
 
-    if (!telegramId) {
-      return res.status(400).json({
-        error: "Invalid telegram_id"
+    const verified=auth(req);
+
+    const telegramId=normalizeId(
+      verified?.id||req.body.telegram_id
+    );
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Telegram authentication failed'
       });
-    }
 
-    let result = await db.execute({
-      sql: `
+    const username=
+      String(
+        verified?.username||
+        req.body.username||
+        ''
+      );
+
+    let result=await db.execute({
+      sql:`
         SELECT *
         FROM users
-        WHERE telegram_id = ?
+        WHERE telegram_id=?
         LIMIT 1
       `,
-      args: [telegramId]
+      args:[telegramId]
     });
 
-    /* -----------------------------------------------------
-       CREATE USER
-    ----------------------------------------------------- */
+    if(!result.rows.length){
 
-    if (result.rows.length === 0) {
-      const now = nowISO();
+      let code=referralCode();
 
       await db.execute({
-        sql: `
+        sql:`
           INSERT INTO users
           (
             telegram_id,
@@ -275,877 +414,919 @@ app.post("/api/user", async (req, res) => {
             energy,
             max_energy,
             last_energy_update,
-            created_at
+            referral_code
           )
-          VALUES (?, ?, 0, 1000, 1000, ?, ?)
+          VALUES(?,?,0,1000,1000,CURRENT_TIMESTAMP,?)
         `,
-        args: [
+        args:[
           telegramId,
           username,
-          now,
-          now
+          code
         ]
       });
-    }
 
-    /* -----------------------------------------------------
-       UPDATE USERNAME
-    ----------------------------------------------------- */
+    }else{
 
-    if (username) {
       await db.execute({
-        sql: `
+        sql:`
           UPDATE users
-          SET username = ?
-          WHERE telegram_id = ?
+          SET username=?
+          WHERE telegram_id=?
         `,
-        args: [
+        args:[
           username,
           telegramId
         ]
       });
+
     }
 
-    /* -----------------------------------------------------
-       ENERGY REGEN
-    ----------------------------------------------------- */
-
-    await regenerateEnergy(
-      telegramId
-    );
-
-    /* -----------------------------------------------------
-       RETURN USER
-    ----------------------------------------------------- */
-
-    result = await db.execute({
-      sql: `
+    result=await db.execute({
+      sql:`
         SELECT *
         FROM users
-        WHERE telegram_id = ?
+        WHERE telegram_id=?
         LIMIT 1
       `,
-      args: [telegramId]
+      args:[telegramId]
     });
 
-    return res.json({
-      ok: true,
-      user: result.rows[0]
+    res.json({
+      ok:true,
+      user:result.rows[0]
     });
 
-  } catch (error) {
-    console.error(
-      "USER ERROR:",
-      error
+  }catch(e){
+
+    console.error('USER ERROR',e);
+
+    res.status(500).json({
+      error:'User request failed'
+    });
+
+  }
+
+});
+
+/* =========================================================
+   TAP
+========================================================= */
+
+app.post('/api/tap',async(req,res)=>{
+
+  try{
+
+    const telegramId=auth(req);
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
+      });
+
+    const result=await db.execute({
+      sql:`
+        UPDATE users
+        SET
+          balance=balance+1,
+          energy=energy-1
+        WHERE telegram_id=?
+        AND energy>0
+      `,
+      args:[telegramId]
+    });
+
+    if(result.rowsAffected===0)
+      return res.status(400).json({
+        error:'Not enough energy'
+      });
+
+    const user=await db.execute({
+      sql:`
+        SELECT *
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    res.json({
+      ok:true,
+      user:user.rows[0]
+    });
+
+  }catch(e){
+
+    console.error('TAP ERROR',e);
+
+    res.status(500).json({
+      error:'Tap failed'
+    });
+
+  }
+
+});
+
+/* =========================================================
+   TASKS
+========================================================= */
+
+app.get('/api/tasks',async(req,res)=>{
+
+  try{
+
+    const telegramId=auth(req);
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
+      });
+
+    const claims=await db.execute({
+      sql:`
+        SELECT task_id
+        FROM task_claims
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    const completed=new Set(
+      claims.rows.map(x=>x.task_id)
     );
 
-    return res.status(500).json({
-      error: "User request failed"
+    const tasks=Object.values(TASKS).map(t=>({
+
+      ...t,
+
+      completed:completed.has(t.id),
+
+      action:
+        t.id==='channel'||
+        t.id==='group'
+        ?'Verify'
+        :'Check'
+
+    }));
+
+    res.json({
+      ok:true,
+      tasks
     });
+
+  }catch(e){
+
+    console.error(e);
+
+    res.status(500).json({
+      error:'Tasks failed'
+    });
+
   }
+
+});
+
+/* =========================================================
+   CLAIM TASK
+========================================================= */
+
+app.post('/api/tasks/claim',async(req,res)=>{
+
+  try{
+
+    const telegramId=auth(req);
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
+      });
+
+    const taskId=String(
+      req.body.task_id||''
+    );
+
+    const task=TASKS[taskId];
+
+    if(!task)
+      return res.status(404).json({
+        error:'Task not found'
+      });
+
+    const already=await db.execute({
+      sql:`
+        SELECT id
+        FROM task_claims
+        WHERE telegram_id=?
+        AND task_id=?
+        LIMIT 1
+      `,
+      args:[
+        telegramId,
+        taskId
+      ]
+    });
+
+    if(already.rows.length)
+      return res.status(400).json({
+        error:'Task already completed'
+      });
+
+    let verified=false;
+
+    if(taskId==='channel'||taskId==='group'){
+
+      const member=await telegram(
+        'getChatMember',
+        {
+          chat_id:task.chat,
+          user_id:telegramId
+        }
+      );
+
+      verified=
+        ['creator','administrator','member']
+          .includes(member.status);
+
+    }else if(taskId==='holder'){
+
+      verified=
+        await checkSnpBalance(
+          req.body.wallet_address||
+          ''
+        );
+
+    }else if(taskId==='twitter'){
+
+      return res.status(400).json({
+        error:'X verification is not configured yet'
+      });
+
+    }
+
+    if(!verified){
+
+      return res.status(400).json({
+        error:
+          'Task not verified. Please complete it and try again.'
+      });
+
+    }
+
+    await db.execute({
+      sql:`
+        INSERT INTO task_claims
+        (telegram_id,task_id,reward)
+        VALUES(?,?,?)
+      `,
+      args:[
+        telegramId,
+        taskId,
+        task.reward
+      ]
+    });
+
+    await rewardUser(
+      telegramId,
+      task.reward,
+      'TASK_REWARD',
+      task.title
+    );
+
+    const user=await db.execute({
+      sql:`
+        SELECT balance
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    res.json({
+      ok:true,
+      reward:task.reward,
+      balance:user.rows[0].balance
+    });
+
+  }catch(e){
+
+    console.error('TASK ERROR',e);
+
+    res.status(400).json({
+      error:
+        'Verification failed. Please try again.'
+    });
+
+  }
+
+});
+
+/* =========================================================
+   DAILY STATUS
+========================================================= */
+
+app.get('/api/daily/status',async(req,res)=>{
+
+  try{
+
+    const telegramId=auth(req);
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
+      });
+
+    const u=await db.execute({
+      sql:`
+        SELECT
+          daily_streak,
+          last_daily_bonus
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    const user=u.rows[0];
+
+    const today=new Date()
+      .toISOString()
+      .slice(0,10);
+
+    let day=Number(
+      user?.daily_streak||0
+    );
+
+    if(day<1)day=1;
+
+    if(user?.last_daily_bonus===today){
+
+      return res.json({
+        ok:true,
+        current_day:day,
+        claimed:true
+      });
+
+    }
+
+    res.json({
+      ok:true,
+      current_day:day,
+      claimed:false
+    });
+
+  }catch(e){
+
+    res.status(500).json({
+      error:'Daily status failed'
+    });
+
+  }
+
+});
+
+/* =========================================================
+   DAILY CLAIM
+========================================================= */
+
+app.post('/api/daily/claim',async(req,res)=>{
+
+  try{
+
+    const telegramId=auth(req);
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
+      });
+
+    const result=await db.execute({
+      sql:`
+        SELECT
+          daily_streak,
+          last_daily_bonus
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    if(!result.rows.length)
+      return res.status(404).json({
+        error:'User not found'
+      });
+
+    const u=result.rows[0];
+
+    const today=new Date()
+      .toISOString()
+      .slice(0,10);
+
+    if(u.last_daily_bonus===today)
+      return res.status(400).json({
+        error:'Daily reward already claimed'
+      });
+
+    let streak=Number(
+      u.daily_streak||0
+    );
+
+    if(streak<1)
+      streak=1;
+    else
+      streak++;
+
+    if(streak>30)
+      streak=1;
+
+    const reward=streak*10;
+
+    await db.execute({
+      sql:`
+        UPDATE users
+        SET
+          balance=balance+?,
+          daily_streak=?,
+          last_daily_bonus=?
+        WHERE telegram_id=?
+      `,
+      args:[
+        reward,
+        streak,
+        today,
+        telegramId
+      ]
+    });
+
+    await addTransaction(
+      telegramId,
+      'DAILY_REWARD',
+      reward,
+      `Day ${streak}`
+    );
+
+    const user=await db.execute({
+      sql:`
+        SELECT balance
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    res.json({
+      ok:true,
+      reward,
+      day:streak,
+      balance:user.rows[0].balance
+    });
+
+  }catch(e){
+
+    console.error('DAILY ERROR',e);
+
+    res.status(500).json({
+      error:'Daily reward failed'
+    });
+
+  }
+
+});
+
+/* =========================================================
+   FRIENDS
+========================================================= */
+
+app.get('/api/friends',async(req,res)=>{
+
+  try{
+
+    const telegramId=auth(req);
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
+      });
+
+    const me=await db.execute({
+      sql:`
+        SELECT referral_code
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    const friends=await db.execute({
+      sql:`
+        SELECT
+          username,
+          balance,
+          created_at
+        FROM users
+        WHERE referred_by=?
+        ORDER BY created_at DESC
+      `,
+      args:[telegramId]
+    });
+
+    res.json({
+      ok:true,
+      referral_code:
+        me.rows[0]?.referral_code||'',
+      count:friends.rows.length,
+      friends:friends.rows
+    });
+
+  }catch(e){
+
+    res.status(500).json({
+      error:'Friends failed'
+    });
+
+  }
+
+});
+
+/* =========================================================
+   HISTORY
+========================================================= */
+
+app.get('/api/history',async(req,res)=>{
+
+  try{
+
+    const telegramId=auth(req);
+
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
+      });
+
+    const result=await db.execute({
+      sql:`
+        SELECT *
+        FROM transactions
+        WHERE telegram_id=?
+        ORDER BY id DESC
+        LIMIT 100
+      `,
+      args:[telegramId]
+    });
+
+    res.json({
+      ok:true,
+      transactions:result.rows
+    });
+
+  }catch(e){
+
+    res.status(500).json({
+      error:'History failed'
+    });
+
+  }
+
 });
 
 /* =========================================================
    WALLET CONNECT
 ========================================================= */
 
-app.post(
-  "/api/wallet/connect",
-  async (req, res) => {
+app.post('/api/wallet/connect',async(req,res)=>{
 
-    try {
+  try{
 
-      const telegramId =
-        normalizeTelegramId(
-          req.body.telegram_id
-        );
+    const telegramId=auth(req);
 
-      const walletAddress =
-        String(
-          req.body.wallet_address || ""
-        ).trim();
+    const wallet=String(
+      req.body.wallet_address||''
+    ).trim();
 
-      if (
-        !telegramId ||
-        !walletAddress
-      ) {
-        return res.status(400).json({
-          error:
-            "telegram_id and wallet_address are required"
-        });
-      }
-
-      const result =
-        await db.execute({
-          sql: `
-            UPDATE users
-            SET wallet_address = ?
-            WHERE telegram_id = ?
-          `,
-          args: [
-            walletAddress,
-            telegramId
-          ]
-        });
-
-      if (
-        result.rowsAffected === 0
-      ) {
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
-      }
-
-      return res.json({
-        ok: true,
-        wallet_address:
-          walletAddress
+    if(!telegramId||!wallet)
+      return res.status(400).json({
+        error:'Invalid wallet'
       });
 
-    } catch (error) {
+    await db.execute({
+      sql:`
+        UPDATE users
+        SET wallet_address=?
+        WHERE telegram_id=?
+      `,
+      args:[
+        wallet,
+        telegramId
+      ]
+    });
 
-      console.error(
-        "WALLET CONNECT ERROR:",
-        error
-      );
+    res.json({
+      ok:true,
+      wallet_address:wallet
+    });
 
-      return res.status(500).json({
-        error:
-          "Wallet save failed"
-      });
-    }
+  }catch(e){
+
+    res.status(500).json({
+      error:'Wallet save failed'
+    });
+
   }
-);
+
+});
 
 /* =========================================================
    WALLET GET
 ========================================================= */
 
-app.post(
-  "/api/wallet/get",
-  async (req, res) => {
+app.post('/api/wallet/get',async(req,res)=>{
 
-    try {
+  try{
 
-      const telegramId =
-        normalizeTelegramId(
-          req.body.telegram_id
-        );
+    const telegramId=auth(req);
 
-      if (!telegramId) {
-        return res.status(400).json({
-          error:
-            "Invalid telegram_id"
-        });
-      }
-
-      const result =
-        await db.execute({
-          sql: `
-            SELECT wallet_address
-            FROM users
-            WHERE telegram_id = ?
-            LIMIT 1
-          `,
-          args: [
-            telegramId
-          ]
-        });
-
-      if (
-        result.rows.length === 0
-      ) {
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
-      }
-
-      return res.json({
-        ok: true,
-        wallet_address:
-          result.rows[0]
-            .wallet_address || null
+    if(!telegramId)
+      return res.status(401).json({
+        error:'Unauthorized'
       });
 
-    } catch (error) {
+    const r=await db.execute({
+      sql:`
+        SELECT wallet_address
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
 
-      console.error(
-        "WALLET GET ERROR:",
-        error
-      );
+    res.json({
+      ok:true,
+      wallet_address:
+        r.rows[0]?.wallet_address||null
+    });
 
-      return res.status(500).json({
-        error:
-          "Wallet lookup failed"
-      });
-    }
+  }catch(e){
+
+    res.status(500).json({
+      error:'Wallet lookup failed'
+    });
+
   }
-);
+
+});
 
 /* =========================================================
-   WALLET DISCONNECT
+   WITHDRAW CREATE
 ========================================================= */
 
-app.post(
-  "/api/wallet/disconnect",
-  async (req, res) => {
+app.post('/api/withdraw/create',async(req,res)=>{
 
-    try {
+  try{
 
-      const telegramId =
-        normalizeTelegramId(
-          req.body.telegram_id
-        );
+    const telegramId=auth(req);
 
-      if (!telegramId) {
-        return res.status(400).json({
-          error:
-            "Invalid telegram_id"
-        });
-      }
+    const wallet=String(
+      req.body.wallet_address||''
+    ).trim();
 
-      await db.execute({
-        sql: `
-          UPDATE users
-          SET wallet_address = NULL
-          WHERE telegram_id = ?
-        `,
-        args: [
-          telegramId
-        ]
+    const amount=Number(
+      req.body.amount||0
+    );
+
+    if(!telegramId||!wallet||!Number.isSafeInteger(amount)||amount<=0)
+      return res.status(400).json({
+        error:'Invalid withdrawal'
       });
 
-      return res.json({
-        ok: true
+    const u=await db.execute({
+      sql:`
+        SELECT *
+        FROM users
+        WHERE telegram_id=?
+      `,
+      args:[telegramId]
+    });
+
+    if(!u.rows.length)
+      return res.status(404).json({
+        error:'User not found'
       });
 
-    } catch (error) {
+    const user=u.rows[0];
 
-      console.error(
-        "WALLET DISCONNECT ERROR:",
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          "Wallet disconnect failed"
+    if(amount>Number(user.balance))
+      return res.status(400).json({
+        error:'Insufficient SNP balance'
       });
-    }
+
+    const id=
+      'SNP-'+
+      Date.now().toString(36).toUpperCase()+
+      '-'+
+      crypto.randomBytes(4)
+        .toString('hex')
+        .toUpperCase();
+
+    await db.execute({
+      sql:`
+        INSERT INTO withdrawals
+        (
+          withdrawal_id,
+          telegram_id,
+          wallet_address,
+          amount,
+          fee_ton,
+          fee_nano,
+          treasury_wallet,
+          token_contract,
+          status
+        )
+        VALUES(?,?,?,?,0.1,?,?,?,'payment_pending')
+      `,
+      args:[
+        id,
+        telegramId,
+        wallet,
+        amount,
+        FEE_NANO,
+        TREASURY_WALLET,
+        SNP_CONTRACT
+      ]
+    });
+
+    await addTransaction(
+      telegramId,
+      'WITHDRAWAL',
+      -amount,
+      'Processing',
+      id
+    );
+
+    res.json({
+      ok:true,
+      withdrawal_id:id,
+      amount,
+      fee_nano:FEE_NANO,
+      treasury_wallet:TREASURY_WALLET,
+      token_contract:SNP_CONTRACT,
+      status:'payment_pending'
+    });
+
+  }catch(e){
+
+    console.error('WITHDRAW CREATE',e);
+
+    res.status(500).json({
+      error:'Withdrawal creation failed'
+    });
+
   }
-);
+
+});
 
 /* =========================================================
-   TAP
+   WITHDRAW VERIFY
 ========================================================= */
 
-/*
- * بسیار مهم:
- *
- * موجودی با:
- *
- *     balance = balance + 1
- *
- * تغییر می‌کند.
- *
- * نه اینکه مقدار قدیمی را بخوانیم،
- * +1 کنیم،
- * و دوباره مقدار را بنویسیم.
- *
- * این روش برای Tapهای سریع بسیار امن‌تر است.
- */
+app.post('/api/withdraw/verify',async(req,res)=>{
 
-app.post(
-  "/api/tap",
-  async (req, res) => {
+  try{
 
-    try {
+    const telegramId=auth(req);
 
-      const telegramId =
-        normalizeTelegramId(
-          req.body.telegram_id
-        );
+    const id=String(
+      req.body.withdrawal_id||''
+    ).trim();
 
-      if (!telegramId) {
+    if(!telegramId||!id)
+      return res.status(400).json({
+        error:'Invalid withdrawal'
+      });
 
-        return res.status(400).json({
-          error:
-            "Invalid telegram_id"
-        });
-      }
-
-      /* ---------------------------------------------------
-         USER CHECK
-      --------------------------------------------------- */
-
-      let result =
-        await db.execute({
-          sql: `
-            SELECT *
-            FROM users
-            WHERE telegram_id = ?
-            LIMIT 1
-          `,
-          args: [
-            telegramId
-          ]
-        });
-
-      if (
-        result.rows.length === 0
-      ) {
-
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
-      }
-
-      /* ---------------------------------------------------
-         ENERGY REGEN
-      --------------------------------------------------- */
-
-      await regenerateEnergy(
+    const r=await db.execute({
+      sql:`
+        SELECT *
+        FROM withdrawals
+        WHERE withdrawal_id=?
+        AND telegram_id=?
+      `,
+      args:[
+        id,
         telegramId
-      );
+      ]
+    });
 
-      /* ---------------------------------------------------
-         ATOMIC TAP
-      ---------------------------------------------------
-
-         این قسمت مهم‌ترین تغییر است.
-
-         اگر 20 Tap همزمان برسد:
-
-         balance = balance + 1
-
-         هر درخواست روی مقدار فعلی
-         دیتابیس اعمال می‌شود.
-
-      --------------------------------------------------- */
-
-      const updateResult =
-        await db.execute({
-          sql: `
-            UPDATE users
-
-            SET
-              balance = balance + 1,
-              energy = energy - 1
-
-            WHERE
-              telegram_id = ?
-              AND energy > 0
-          `,
-          args: [
-            telegramId
-          ]
-        });
-
-      /* ---------------------------------------------------
-         NO ENERGY
-      --------------------------------------------------- */
-
-      if (
-        updateResult.rowsAffected === 0
-      ) {
-
-        const current =
-          await db.execute({
-            sql: `
-              SELECT *
-              FROM users
-              WHERE telegram_id = ?
-              LIMIT 1
-            `,
-            args: [
-              telegramId
-            ]
-          });
-
-        return res.status(400).json({
-          error:
-            "Not enough energy",
-
-          user:
-            current.rows[0]
-        });
-      }
-
-      /* ---------------------------------------------------
-         GET FINAL USER
-      --------------------------------------------------- */
-
-      result =
-        await db.execute({
-          sql: `
-            SELECT *
-            FROM users
-            WHERE telegram_id = ?
-            LIMIT 1
-          `,
-          args: [
-            telegramId
-          ]
-        });
-
-      return res.json({
-        ok: true,
-        user:
-          result.rows[0]
+    if(!r.rows.length)
+      return res.status(404).json({
+        error:'Withdrawal not found'
       });
 
-    } catch (error) {
+    res.json({
+      ok:true,
+      status:r.rows[0].status,
+      withdrawal:r.rows[0]
+    });
 
-      console.error(
-        "TAP ERROR:",
-        error
-      );
+  }catch(e){
 
-      return res.status(500).json({
-        error:
-          "Tap failed"
-      });
-    }
+    res.status(500).json({
+      error:'Verification failed'
+    });
+
   }
-);
+
+});
 
 /* =========================================================
-   CREATE WITHDRAWAL
+   SNP BALANCE CHECK
 ========================================================= */
 
-app.post(
-  "/api/withdraw/create",
-  async (req, res) => {
-
-    try {
-
-      const telegramId =
-        normalizeTelegramId(
-          req.body.telegram_id
-        );
-
-      const walletAddress =
-        String(
-          req.body.wallet_address || ""
-        ).trim();
-
-      const amount =
-        normalizeAmount(
-          req.body.amount
-        );
-
-      if (
-        !telegramId ||
-        !walletAddress ||
-        !amount
-      ) {
-
-        return res.status(400).json({
-          error:
-            "Invalid withdrawal data"
-        });
-      }
-
-      const userResult =
-        await db.execute({
-          sql: `
-            SELECT *
-            FROM users
-            WHERE telegram_id = ?
-            LIMIT 1
-          `,
-          args: [
-            telegramId
-          ]
-        });
-
-      if (
-        userResult.rows.length === 0
-      ) {
-
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
-      }
-
-      const user =
-        userResult.rows[0];
-
-      if (
-        user.wallet_address &&
-        user.wallet_address !==
-          walletAddress
-      ) {
-
-        return res.status(400).json({
-          error:
-            "Wallet does not match saved wallet"
-        });
-      }
-
-      const balance =
-        Number(
-          user.balance || 0
-        );
-
-      if (amount > balance) {
-
-        return res.status(400).json({
-          error:
-            "Insufficient SNP balance"
-        });
-      }
-
-      const pending =
-        await db.execute({
-          sql: `
-            SELECT withdrawal_id
-            FROM withdrawals
-            WHERE telegram_id = ?
-            AND status IN (
-              'created',
-              'payment_pending',
-              'verified',
-              'processing'
-            )
-            LIMIT 1
-          `,
-          args: [
-            telegramId
-          ]
-        });
-
-      if (
-        pending.rows.length > 0
-      ) {
-
-        return res.status(400).json({
-          error:
-            "There is already a pending withdrawal",
-
-          withdrawal_id:
-            pending.rows[0]
-              .withdrawal_id
-        });
-      }
-
-      const withdrawalId =
-        "SNP-" +
-        Date.now()
-          .toString(36)
-          .toUpperCase() +
-        "-" +
-        crypto
-          .randomBytes(4)
-          .toString("hex")
-          .toUpperCase();
-
-      await db.execute({
-        sql: `
-          INSERT INTO withdrawals
-          (
-            withdrawal_id,
-            telegram_id,
-            wallet_address,
-            amount,
-            fee_ton,
-            fee_nano,
-            treasury_wallet,
-            token_contract,
-            status
-          )
-
-          VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            0.1,
-            ?,
-            ?,
-            ?,
-            'payment_pending'
-          )
-        `,
-        args: [
-          withdrawalId,
-          telegramId,
-          walletAddress,
-          amount,
-          WITHDRAW_FEE_NANO,
-          TREASURY_WALLET,
-          SNP_CONTRACT
-        ]
-      });
-
-      return res.json({
-        ok: true,
-
-        withdrawal_id:
-          withdrawalId,
-
-        amount:
-          amount,
-
-        fee_ton:
-          0.1,
-
-        fee_nano:
-          WITHDRAW_FEE_NANO,
-
-        treasury_wallet:
-          TREASURY_WALLET,
-
-        token_contract:
-          SNP_CONTRACT,
-
-        status:
-          "payment_pending"
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WITHDRAW CREATE ERROR:",
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          "Withdrawal creation failed"
-      });
-    }
-  }
-);
-
-/* =========================================================
-   WITHDRAW STATUS
-========================================================= */
-
-app.get(
-  "/api/withdraw/status/:withdrawalId",
-  async (req, res) => {
-
-    try {
-
-      const withdrawalId =
-        String(
-          req.params.withdrawalId || ""
-        ).trim();
-
-      if (!withdrawalId) {
-
-        return res.status(400).json({
-          error:
-            "Invalid withdrawal ID"
-        });
-      }
-
-      const result =
-        await db.execute({
-          sql: `
-            SELECT *
-            FROM withdrawals
-            WHERE withdrawal_id = ?
-            LIMIT 1
-          `,
-          args: [
-            withdrawalId
-          ]
-        });
-
-      if (
-        result.rows.length === 0
-      ) {
-
-        return res.status(404).json({
-          error:
-            "Withdrawal not found"
-        });
-      }
-
-      return res.json({
-        ok: true,
-
-        withdrawal:
-          result.rows[0]
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WITHDRAW STATUS ERROR:",
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          "Withdrawal status failed"
-      });
-    }
-  }
-);
-
-/* =========================================================
-   VERIFY WITHDRAWAL
-========================================================= */
-
-app.post(
-  "/api/withdraw/verify",
-  async (req, res) => {
-
-    try {
-
-      const telegramId =
-        normalizeTelegramId(
-          req.body.telegram_id
-        );
-
-      const withdrawalId =
-        String(
-          req.body.withdrawal_id || ""
-        ).trim();
-
-      const walletAddress =
-        String(
-          req.body.wallet_address || ""
-        ).trim();
-
-      if (
-        !telegramId ||
-        !withdrawalId ||
-        !walletAddress
-      ) {
-
-        return res.status(400).json({
-          error:
-            "Invalid verification data"
-        });
-      }
-
-      const result =
-        await db.execute({
-          sql: `
-            SELECT *
-            FROM withdrawals
-            WHERE withdrawal_id = ?
-            LIMIT 1
-          `,
-          args: [
-            withdrawalId
-          ]
-        });
-
-      if (
-        result.rows.length === 0
-      ) {
-
-        return res.status(404).json({
-          error:
-            "Withdrawal not found"
-        });
-      }
-
-      const withdrawal =
-        result.rows[0];
-
-      if (
-        Number(
-          withdrawal.telegram_id
-        ) !== telegramId
-      ) {
-
-        return res.status(403).json({
-          error:
-            "Telegram user mismatch"
-        });
-      }
-
-      if (
-        withdrawal.wallet_address !==
-        walletAddress
-      ) {
-
-        return res.status(403).json({
-          error:
-            "Wallet mismatch"
-        });
-      }
-
-      if (
-        withdrawal.status ===
-        "completed"
-      ) {
-
-        return res.json({
-          ok: true,
-
-          status:
-            "completed",
-
-          withdrawal:
-            withdrawal
-        });
-      }
-
-      return res.json({
-        ok: true,
-
-        status:
-          withdrawal.status,
-
-        withdrawal:
-          withdrawal
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WITHDRAW VERIFY ERROR:",
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          "Withdrawal verification failed"
-      });
-    }
-  }
-);
-
-/* =========================================================
-   START SERVER
-========================================================= */
-
-async function start() {
-
-  try {
-
-    await initDatabase();
-
-    app.listen(
-      PORT,
-      () => {
-
-        console.log(
-          `SINAPS backend running on port ${PORT}`
-        );
-
+async function checkSnpBalance(wallet){
+
+  if(!wallet)
+    return false;
+
+  try{
+
+    const url=
+      TONCENTER+
+      '/jetton/wallets?address='+
+      encodeURIComponent(wallet)+
+      '&jetton_address='+
+      encodeURIComponent(SNP_CONTRACT);
+
+    const r=await fetch(
+      url,
+      {
+        headers:
+          TONCENTER_API_KEY
+          ? {'X-API-Key':TONCENTER_API_KEY}
+          : {}
       }
     );
 
-  } catch (error) {
+    if(!r.ok)return false;
+
+    const d=await r.json();
+
+    const rows=
+      d.jetton_wallets||
+      d.wallets||
+      d.result||
+      [];
+
+    for(const x of rows){
+
+      const raw=
+        Number(
+          x.balance||
+          x.jetton_balance||
+          0
+        );
+
+      if(raw>=50000*1e9)
+        return true;
+
+    }
+
+    return false;
+
+  }catch(e){
 
     console.error(
-      "STARTUP ERROR:",
-      error
+      'SNP BALANCE CHECK',
+      e
+    );
+
+    return false;
+  }
+
+}
+
+/* =========================================================
+   START
+========================================================= */
+
+async function start(){
+
+  try{
+
+    await initDatabase();
+
+    app.listen(PORT,()=>{
+      console.log(
+        `SINAPS backend running on port ${PORT}`
+      );
+    });
+
+  }catch(e){
+
+    console.error(
+      'STARTUP ERROR',
+      e
     );
 
     process.exit(1);
   }
+
 }
 
 start();
