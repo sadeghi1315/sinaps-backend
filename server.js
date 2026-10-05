@@ -61,6 +61,7 @@ const db = createClient({
   authToken: DB_TOKEN
 });
 
+
 // ============================================================
 // BOOSTS
 // ============================================================
@@ -149,6 +150,7 @@ const BOOST_LEVELS = {
   ]
 
 };
+
 
 // ============================================================
 // TASKS
@@ -641,11 +643,6 @@ async function rewardReferralOwner(
 // ============================================================
 // QUALIFY REFERRAL
 // ============================================================
-// مهم:
-// Referral فقط زمانی فعال می‌شود که زیرمجموعه Wallet خود را
-// متصل کرده باشد.
-// پاداش اولیه = 100 SNP
-// ============================================================
 
 async function qualifyReferral(telegramId) {
 
@@ -678,12 +675,10 @@ async function qualifyReferral(telegramId) {
     const user =
       userResult.rows[0];
 
-    // کاربر باید زیرمجموعه باشد
     if (!user.referred_by) {
       return 0;
     }
 
-    // Wallet باید متصل باشد
     if (
       !user.wallet_address ||
       String(user.wallet_address).trim() === ""
@@ -691,24 +686,18 @@ async function qualifyReferral(telegramId) {
       return 0;
     }
 
-    // قبلاً پاداش گرفته
     if (
       Number(user.referral_rewarded || 0) === 1
     ) {
       return 0;
     }
 
-    // جلوگیری از self referral
     if (
       String(user.referred_by) ===
       String(user.telegram_id)
     ) {
       return 0;
     }
-
-    // --------------------------------------------------------
-    // قفل کردن Referral
-    // --------------------------------------------------------
 
     const changed =
       await db.execute({
@@ -737,10 +726,6 @@ async function qualifyReferral(telegramId) {
       return 0;
     }
 
-    // --------------------------------------------------------
-    // پیدا کردن معرف
-    // --------------------------------------------------------
-
     const referrerResult =
       await db.execute({
 
@@ -758,7 +743,6 @@ async function qualifyReferral(telegramId) {
 
       });
 
-    // اگر معرف وجود ندارد
     if (!referrerResult.rows.length) {
 
       await db.execute({
@@ -781,10 +765,6 @@ async function qualifyReferral(telegramId) {
     const referrer =
       referrerResult.rows[0];
 
-    // --------------------------------------------------------
-    // پرداخت 100 SNP به معرف
-    // --------------------------------------------------------
-
     await db.execute({
 
       sql: `
@@ -799,10 +779,6 @@ async function qualifyReferral(telegramId) {
       ]
 
     });
-
-    // --------------------------------------------------------
-    // ثبت تراکنش
-    // --------------------------------------------------------
 
     await addTransaction(
 
@@ -870,7 +846,6 @@ async function rewardUser(
     details
   );
 
-  // 15% referral commission
   await rewardReferralOwner(
     telegramId,
     amount,
@@ -940,11 +915,6 @@ async function initDB() {
     "Initializing SINAPS database..."
   );
 
-
-  // ==========================================================
-  // USERS
-  // ==========================================================
-
   await db.execute(`
 
     CREATE TABLE IF NOT EXISTS users (
@@ -990,11 +960,6 @@ async function initDB() {
     )
 
   `);
-
-
-  // ==========================================================
-  // MIGRATIONS
-  // ==========================================================
 
   await ensureColumn(
     "users",
@@ -1050,7 +1015,6 @@ async function initDB() {
     "TEXT"
   );
 
-  // مهم برای Referral
   await ensureColumn(
     "users",
     "referred_by",
@@ -1100,10 +1064,6 @@ async function initDB() {
   );
 
 
-  // ==========================================================
-  // TRANSACTIONS
-  // ==========================================================
-
   await db.execute(`
 
     CREATE TABLE IF NOT EXISTS transactions (
@@ -1126,10 +1086,6 @@ async function initDB() {
 
   `);
 
-
-  // ==========================================================
-  // TASK CLAIMS
-  // ==========================================================
 
   await db.execute(`
 
@@ -1154,10 +1110,6 @@ async function initDB() {
   `);
 
 
-  // ==========================================================
-  // DAILY
-  // ==========================================================
-
   await db.execute(`
 
     CREATE TABLE IF NOT EXISTS daily_rewards (
@@ -1178,10 +1130,6 @@ async function initDB() {
 
   `);
 
-
-  // ==========================================================
-  // BOOST PURCHASES
-  // ==========================================================
 
   await db.execute(`
 
@@ -1205,10 +1153,6 @@ async function initDB() {
 
   `);
 
-
-  // ==========================================================
-  // WITHDRAWALS
-  // ==========================================================
 
   await db.execute(`
 
@@ -1248,10 +1192,6 @@ async function initDB() {
 
   `);
 
-
-  // ==========================================================
-  // OLD USERS DEFAULTS
-  // ==========================================================
 
   await db.execute(`
 
@@ -1301,10 +1241,6 @@ async function initDB() {
 
   `);
 
-
-  // ==========================================================
-  // CREATE REFERRAL CODES FOR OLD USERS
-  // ==========================================================
 
   const oldUsers =
     await db.execute(`
@@ -1460,42 +1396,131 @@ async function isTelegramMember(
 }
 
 
-// ===============================
+// ============================================================
 // TELEGRAM /START WELCOME MESSAGE
-// ===============================
+// ============================================================
 
-app.post('/telegram/webhook', async (req, res) => {
-  // Telegram needs a quick response
-  res.sendStatus(200);
+app.post(
+  "/telegram/webhook",
+  async (req, res) => {
 
-  try {
-    const update = req.body;
-    const message = update?.message;
+    res.sendStatus(200);
 
-    if (!message?.chat?.id) return;
-    if (message.chat.type !== 'private') return;
+    try {
 
-    const text = String(message.text || '');
+      const update =
+        req.body;
 
-    // Handles /start and /start payload
-    if (!/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)) return;
+      const message =
+        update?.message;
 
-    const chatId = message.chat.id;
+      if (!message?.chat?.id) {
+        return;
+      }
 
-    // URL of the SINAPS image
-    const photoUrl =
-      'https://sadeghi1315.github.io/sinaps-tap-to-earn/logo.png';
+      if (
+        message.chat.type !==
+        "private"
+      ) {
+        return;
+      }
 
-    await telegramApi('sendPhoto', {
-      chat_id: chatId,
-      photo: photoUrl,
-      caption: '🚀 Welcome to SINAPS'
-    });
+      const text =
+        String(
+          message.text || ""
+        );
 
-  } catch (e) {
-    console.error('Telegram /start error:', e);
+      if (
+        !/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)
+      ) {
+        return;
+      }
+
+      const chatId =
+        message.chat.id;
+
+
+      // ========================================================
+      // SINAPS WELCOME IMAGE
+      // ========================================================
+
+      const photoUrl =
+        "https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true";
+
+
+      // ========================================================
+      // SINAPS MINI APP
+      // ========================================================
+
+      const miniAppUrl =
+        "https://sadeghi1315.github.io/sinaps-tap-to-earn/";
+
+
+      // ========================================================
+      // SEND WELCOME MESSAGE
+      // ========================================================
+
+      await telegramApi(
+        "sendPhoto",
+        {
+
+          chat_id:
+            chatId,
+
+          photo:
+            photoUrl,
+
+          caption:
+`🚀 Welcome to SINAPS
+
+Tap • Earn • Grow
+
+Start earning SNP and build your SINAPS balance.
+
+🎁 Daily Rewards
+⚡ Boosts
+👥 Referral Rewards
+💎 TON Wallet
+
+Your SINAPS journey starts here.`,
+
+          reply_markup: {
+
+            inline_keyboard: [
+
+              [
+                {
+                  text:
+                    "🚀 START SINAPS",
+
+                  web_app: {
+                    url:
+                      miniAppUrl
+                  }
+
+                }
+
+              ]
+
+            ]
+
+          }
+
+        }
+      );
+
+    } catch (error) {
+
+      console.error(
+        "Telegram /start error:",
+        error
+      );
+
+    }
+
   }
-});
+);
+
 
 // ============================================================
 // SNP HOLDER CHECK
@@ -1522,13 +1547,11 @@ async function checkSnpBalance(
     `?address=${encodeURIComponent(wallet)}` +
     `&jetton_address=${encodeURIComponent(SNP_CONTRACT)}`;
 
-
   const response =
     await fetch(
       url,
       { headers }
     );
-
 
   if (!response.ok) {
 
@@ -1538,16 +1561,13 @@ async function checkSnpBalance(
 
   }
 
-
   const data =
     await response.json();
-
 
   const row =
     data.jetton_wallets?.[0] ||
     data.wallets?.[0] ||
     data[0];
-
 
   const raw =
     BigInt(
@@ -1555,7 +1575,6 @@ async function checkSnpBalance(
         row?.balance || "0"
       )
     );
-
 
   return (
     raw >=
@@ -1605,13 +1624,11 @@ app.post(
         return;
       }
 
-
       const telegramId =
         verified.id;
 
       const username =
         verified.username || "";
-
 
       const startParam =
         String(
@@ -1620,22 +1637,16 @@ app.post(
           .trim()
           .toUpperCase();
 
-
       let user =
         await getUser(
           telegramId
         );
 
 
-      // --------------------------------------------------------
-      // NEW USER
-      // --------------------------------------------------------
-
       if (!user) {
 
         let referralCode =
           randomCode();
-
 
         while (
           (
@@ -1664,10 +1675,6 @@ app.post(
         let referredBy =
           null;
 
-
-        // ------------------------------------------------------
-        // Process referral link
-        // ------------------------------------------------------
 
         if (startParam) {
 
@@ -1768,14 +1775,7 @@ app.post(
             telegramId
           );
 
-      }
-
-
-      // --------------------------------------------------------
-      // EXISTING USER
-      // --------------------------------------------------------
-
-      else {
+      } else {
 
         await db.execute({
 
@@ -1819,7 +1819,8 @@ app.post(
       );
 
       res.status(500).json({
-        error: "User load failed"
+        error:
+          "User load failed"
       });
 
     }
@@ -1845,25 +1846,22 @@ app.post(
         return;
       }
 
-
       const telegramId =
         verified.id;
-
 
       const user =
         await syncEnergy(
           telegramId
         );
 
-
       if (!user) {
 
         return res.status(404).json({
-          error: "User not found"
+          error:
+            "User not found"
         });
 
       }
-
 
       const count =
         Math.min(
@@ -1877,18 +1875,15 @@ app.post(
           )
         );
 
-
       const energy =
         Number(
           user.energy || 0
         );
 
-
       const tapPower =
         Number(
           user.tap_power || 1
         );
-
 
       const usable =
         Math.min(
@@ -1896,12 +1891,12 @@ app.post(
           energy
         );
 
-
       if (usable <= 0) {
 
         return res.status(400).json({
 
-          error: "No energy",
+          error:
+            "No energy",
 
           user:
             publicUser(user)
@@ -1910,10 +1905,8 @@ app.post(
 
       }
 
-
       const reward =
         usable * tapPower;
-
 
       const result =
         await db.execute({
@@ -1940,7 +1933,6 @@ app.post(
 
         });
 
-
       if (!result.rowsAffected) {
 
         return res.status(409).json({
@@ -1950,12 +1942,10 @@ app.post(
 
       }
 
-
       const updated =
         await getUser(
           telegramId
         );
-
 
       res.json({
 
@@ -1980,7 +1970,8 @@ app.post(
       );
 
       res.status(500).json({
-        error: "Tap failed"
+        error:
+          "Tap failed"
       });
 
     }
@@ -2038,21 +2029,19 @@ app.get(
         return;
       }
 
-
       const user =
         await syncEnergy(
           verified.id
         );
 
-
       if (!user) {
 
         return res.status(404).json({
-          error: "User not found"
+          error:
+            "User not found"
         });
 
       }
-
 
       const boosts =
         Object.entries(
@@ -2066,14 +2055,12 @@ app.get(
                 type
               );
 
-
             const next =
               levels.find(
                 x =>
                   x.level ===
                   current + 1
               );
-
 
             return {
 
@@ -2103,7 +2090,6 @@ app.get(
 
           }
         );
-
 
       res.json({
 
@@ -2154,31 +2140,27 @@ app.post(
         return;
       }
 
-
       const telegramId =
         verified.id;
-
 
       const user =
         await syncEnergy(
           telegramId
         );
 
-
       if (!user) {
 
         return res.status(404).json({
-          error: "User not found"
+          error:
+            "User not found"
         });
 
       }
-
 
       const type =
         String(
           req.body.type || ""
         );
-
 
       if (!BOOST_LEVELS[type]) {
 
@@ -2189,13 +2171,11 @@ app.post(
 
       }
 
-
       const current =
         getBoostLevel(
           user,
           type
         );
-
 
       const next =
         BOOST_LEVELS[type].find(
@@ -2203,7 +2183,6 @@ app.post(
             x.level ===
             current + 1
         );
-
 
       if (!next) {
 
@@ -2213,11 +2192,6 @@ app.post(
         });
 
       }
-
-
-      // --------------------------------------------------------
-      // Deduct SNP
-      // --------------------------------------------------------
 
       const deducted =
         await db.execute({
@@ -2240,7 +2214,6 @@ app.post(
 
         });
 
-
       if (!deducted.rowsAffected) {
 
         return res.status(400).json({
@@ -2251,11 +2224,6 @@ app.post(
         });
 
       }
-
-
-      // --------------------------------------------------------
-      // TAP BOOST
-      // --------------------------------------------------------
 
       if (type === "tap") {
 
@@ -2280,11 +2248,6 @@ app.post(
         });
 
       }
-
-
-      // --------------------------------------------------------
-      // ENERGY BOOST
-      // --------------------------------------------------------
 
       if (type === "energy") {
 
@@ -2311,7 +2274,6 @@ app.post(
               )
           );
 
-
         await db.execute({
 
           sql: `
@@ -2336,11 +2298,6 @@ app.post(
 
       }
 
-
-      // --------------------------------------------------------
-      // RECHARGE BOOST
-      // --------------------------------------------------------
-
       if (type === "recharge") {
 
         await db.execute({
@@ -2364,11 +2321,6 @@ app.post(
         });
 
       }
-
-
-      // --------------------------------------------------------
-      // Purchase record
-      // --------------------------------------------------------
 
       await db.execute({
 
@@ -2396,7 +2348,6 @@ app.post(
 
       });
 
-
       await addTransaction(
 
         telegramId,
@@ -2411,12 +2362,10 @@ app.post(
 
       );
 
-
       const updated =
         await getUser(
           telegramId
         );
-
 
       res.json({
 
@@ -2466,16 +2415,13 @@ app.get(
         return;
       }
 
-
       const user =
         await getUser(
           verified.id
         );
 
-
       const today =
         dateOnly();
-
 
       const last =
         user?.last_daily_bonus
@@ -2484,13 +2430,10 @@ app.get(
             ).slice(0, 10)
           : null;
 
-
       const claimedToday =
         last === today;
 
-
       let nextDay = 1;
-
 
       if (claimedToday) {
 
@@ -2499,9 +2442,7 @@ app.get(
             user.daily_streak || 1
           );
 
-      }
-
-      else if (
+      } else if (
         last &&
         dayDifference(
           last,
@@ -2516,17 +2457,14 @@ app.get(
 
       }
 
-
       if (nextDay > 30) {
         nextDay = 1;
       }
-
 
       const streak =
         Number(
           user?.daily_streak || 0
         );
-
 
       const claimedThrough =
         claimedToday
@@ -2547,7 +2485,6 @@ app.get(
               )
             : 0;
 
-
       const claimedDays =
         Array.from(
           {
@@ -2557,7 +2494,6 @@ app.get(
           (_, i) =>
             i + 1
         );
-
 
       res.json({
 
@@ -2613,16 +2549,13 @@ app.post(
         return;
       }
 
-
       const telegramId =
         verified.id;
-
 
       const user =
         await getUser(
           telegramId
         );
-
 
       if (!user) {
 
@@ -2633,10 +2566,8 @@ app.post(
 
       }
 
-
       const today =
         dateOnly();
-
 
       const last =
         user.last_daily_bonus
@@ -2644,7 +2575,6 @@ app.post(
               user.last_daily_bonus
             ).slice(0, 10)
           : null;
-
 
       if (last === today) {
 
@@ -2654,7 +2584,6 @@ app.post(
         });
 
       }
-
 
       let day =
         (
@@ -2669,15 +2598,12 @@ app.post(
             ) + 1
           : 1;
 
-
       if (day > 30) {
         day = 1;
       }
 
-
       const reward =
         day * 10;
-
 
       const updated =
         await db.execute({
@@ -2714,7 +2640,6 @@ app.post(
 
         });
 
-
       if (!updated.rowsAffected) {
 
         return res.status(409).json({
@@ -2723,7 +2648,6 @@ app.post(
         });
 
       }
-
 
       await db.execute({
 
@@ -2747,7 +2671,6 @@ app.post(
 
       });
 
-
       await addTransaction(
 
         telegramId,
@@ -2762,19 +2685,16 @@ app.post(
 
       );
 
-
       await rewardReferralOwner(
         telegramId,
         reward,
         "DAILY"
       );
 
-
       const fresh =
         await getUser(
           telegramId
         );
-
 
       res.json({
 
@@ -2827,12 +2747,10 @@ app.post(
         return;
       }
 
-
       const wallet =
         String(
           req.body.wallet_address || ""
         ).trim();
-
 
       if (
         wallet.length < 20 ||
@@ -2845,7 +2763,6 @@ app.post(
         });
 
       }
-
 
       await db.execute({
 
@@ -2864,22 +2781,15 @@ app.post(
 
       });
 
-
-      // --------------------------------------------------------
-      // Referral activates ONLY after wallet connection
-      // --------------------------------------------------------
-
       const referralReward =
         await qualifyReferral(
           verified.id
         );
 
-
       const user =
         await getUser(
           verified.id
         );
-
 
       res.json({
 
@@ -2932,7 +2842,6 @@ app.post(
         return;
       }
 
-
       await db.execute({
 
         sql: `
@@ -2948,7 +2857,6 @@ app.post(
         ]
 
       });
-
 
       res.json({
 
@@ -2994,12 +2902,10 @@ app.post(
         return;
       }
 
-
       const user =
         await getUser(
           verified.id
         );
-
 
       res.json({
 
@@ -3047,7 +2953,6 @@ app.get(
         return;
       }
 
-
       const result =
         await db.execute({
 
@@ -3063,7 +2968,6 @@ app.get(
 
         });
 
-
       const claimed =
         new Set(
           result.rows.map(
@@ -3071,7 +2975,6 @@ app.get(
               String(x.task_id)
           )
         );
-
 
       res.json({
 
@@ -3134,23 +3037,19 @@ app.post(
         return;
       }
 
-
       const telegramId =
         verified.id;
-
 
       const taskId =
         String(
           req.body.task_id || ""
         );
 
-
       const task =
         TASKS.find(
           t =>
             t.id === taskId
         );
-
 
       if (!task) {
 
@@ -3160,7 +3059,6 @@ app.post(
         });
 
       }
-
 
       const existing =
         await db.execute({
@@ -3179,7 +3077,6 @@ app.post(
 
         });
 
-
       if (existing.rows.length) {
 
         return res.status(400).json({
@@ -3188,11 +3085,6 @@ app.post(
         });
 
       }
-
-
-      // --------------------------------------------------------
-      // Telegram task
-      // --------------------------------------------------------
 
       if (
         task.type ===
@@ -3206,7 +3098,6 @@ app.post(
               task.chat,
               telegramId
             );
-
 
           if (!member) {
 
@@ -3238,10 +3129,6 @@ app.post(
       }
 
 
-      // --------------------------------------------------------
-      // HOLDER TASK
-      // --------------------------------------------------------
-
       if (
         task.type ===
         "holder"
@@ -3252,14 +3139,12 @@ app.post(
             telegramId
           );
 
-
         const wallet =
           String(
             req.body.wallet_address ||
             user?.wallet_address ||
             ""
           ).trim();
-
 
         if (!wallet) {
 
@@ -3272,12 +3157,10 @@ app.post(
 
         }
 
-
         const holder =
           await checkSnpBalance(
             wallet
           );
-
 
         if (!holder) {
 
@@ -3292,10 +3175,6 @@ app.post(
 
       }
 
-
-      // --------------------------------------------------------
-      // Claim task
-      // --------------------------------------------------------
 
       await db.execute({
 
@@ -3339,7 +3218,6 @@ app.post(
         await getUser(
           telegramId
         );
-
 
       res.json({
 
@@ -3391,12 +3269,10 @@ app.get(
         return;
       }
 
-
       const user =
         await getUser(
           verified.id
         );
-
 
       const friends =
         await db.execute({
@@ -3423,7 +3299,6 @@ app.get(
 
         });
 
-
       const earnings =
         await db.execute({
 
@@ -3449,10 +3324,8 @@ app.get(
 
         });
 
-
       const code =
         user?.referral_code || "";
-
 
       const mapped =
         friends.rows.map(
@@ -3491,7 +3364,6 @@ app.get(
 
           })
         );
-
 
       res.json({
 
@@ -3564,7 +3436,6 @@ app.get(
         return;
       }
 
-
       const result =
         await db.execute({
 
@@ -3584,7 +3455,6 @@ app.get(
           ]
 
         });
-
 
       res.json({
 
@@ -3631,10 +3501,8 @@ app.post(
         return;
       }
 
-
       const telegramId =
         verified.id;
-
 
       const amount =
         safeInt(
@@ -3642,13 +3510,11 @@ app.post(
           0
         );
 
-
       const requestedWallet =
         String(
           req.body.wallet_address ||
           ""
         ).trim();
-
 
       if (amount <= 0) {
 
@@ -3659,12 +3525,10 @@ app.post(
 
       }
 
-
       const user =
         await getUser(
           telegramId
         );
-
 
       if (!user) {
 
@@ -3674,7 +3538,6 @@ app.post(
         });
 
       }
-
 
       if (
         !requestedWallet ||
@@ -3687,7 +3550,6 @@ app.post(
         });
 
       }
-
 
       if (
         user.wallet_address &&
@@ -3704,17 +3566,11 @@ app.post(
 
       }
 
-
       const withdrawalId =
         `SNP-${Date.now()}-${crypto
           .randomBytes(4)
           .toString("hex")
           .toUpperCase()}`;
-
-
-      // --------------------------------------------------------
-      // Reserve SNP
-      // --------------------------------------------------------
 
       const deducted =
         await db.execute({
@@ -3738,7 +3594,6 @@ app.post(
 
         });
 
-
       if (!deducted.rowsAffected) {
 
         return res.status(400).json({
@@ -3747,7 +3602,6 @@ app.post(
         });
 
       }
-
 
       try {
 
@@ -3796,7 +3650,6 @@ app.post(
 
         });
 
-
         await addTransaction(
 
           telegramId,
@@ -3811,10 +3664,7 @@ app.post(
 
         );
 
-
       } catch (error) {
-
-        // Refund if database insertion failed
 
         await db.execute({
 
@@ -3835,12 +3685,10 @@ app.post(
 
       }
 
-
       const fresh =
         await getUser(
           telegramId
         );
-
 
       res.json({
 
@@ -3903,13 +3751,11 @@ app.post(
         return;
       }
 
-
       const id =
         String(
           req.body.withdrawal_id ||
           ""
         );
-
 
       const result =
         await db.execute({
@@ -3932,7 +3778,6 @@ app.post(
 
         });
 
-
       if (!result.rows.length) {
 
         return res.status(404).json({
@@ -3942,10 +3787,8 @@ app.post(
 
       }
 
-
       const withdrawal =
         result.rows[0];
-
 
       if (
         withdrawal.status ===
@@ -3978,7 +3821,6 @@ app.post(
 
       }
 
-
       const fresh =
         await db.execute({
 
@@ -3997,7 +3839,6 @@ app.post(
           ]
 
         });
-
 
       res.json({
 
@@ -4046,13 +3887,11 @@ app.post(
         return;
       }
 
-
       const id =
         String(
           req.body.withdrawal_id ||
           ""
         );
-
 
       const result =
         await db.execute({
@@ -4075,7 +3914,6 @@ app.post(
 
         });
 
-
       if (!result.rows.length) {
 
         return res.status(404).json({
@@ -4085,10 +3923,8 @@ app.post(
 
       }
 
-
       const withdrawal =
         result.rows[0];
-
 
       if (
         withdrawal.status !==
@@ -4103,7 +3939,6 @@ app.post(
         });
 
       }
-
 
       const changed =
         await db.execute({
@@ -4127,7 +3962,6 @@ app.post(
 
         });
 
-
       if (changed.rowsAffected) {
 
         await db.execute({
@@ -4150,7 +3984,6 @@ app.post(
 
         });
 
-
         await addTransaction(
 
           verified.id,
@@ -4169,12 +4002,10 @@ app.post(
 
       }
 
-
       const user =
         await getUser(
           verified.id
         );
-
 
       res.json({
 
@@ -4209,16 +4040,6 @@ app.post(
 
 
 // ============================================================
-// START
-// ============================================================
-
-async function start() {
-
-  try {
-
-    await initDB();
-    
-// ============================================================
 // SET TELEGRAM WEBHOOK
 // ============================================================
 
@@ -4227,34 +4048,35 @@ async function setupTelegramWebhook() {
   if (!BOT_TOKEN) {
 
     console.log(
-      'TELEGRAM_BOT_TOKEN is missing'
+      "TELEGRAM_BOT_TOKEN is missing"
     );
 
     return;
   }
 
   const webhookUrl =
-    'https://sinaps-backend.onrender.com/telegram/webhook';
+    "https://sinaps-backend.onrender.com/telegram/webhook";
 
   try {
 
-    const result = await telegramApi(
-      'setWebhook',
-      {
-        url: webhookUrl
-      }
-    );
+    const result =
+      await telegramApi(
+        "setWebhook",
+        {
+          url: webhookUrl
+        }
+      );
 
     console.log(
-      'Telegram webhook:',
+      "Telegram webhook:",
       result
     );
 
-  } catch (e) {
+  } catch (error) {
 
     console.error(
-      'Telegram webhook setup failed:',
-      e
+      "Telegram webhook setup failed:",
+      error
     );
 
   }
@@ -4297,5 +4119,6 @@ async function start() {
   }
 
 }
+
 
 start();
