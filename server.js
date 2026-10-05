@@ -4217,94 +4217,50 @@ async function start() {
   try {
 
     await initDB();
+    
 // ============================================================
 // SET TELEGRAM WEBHOOK
 // ============================================================
 
-// ===============================
-// TELEGRAM /START WELCOME MESSAGE
-// ===============================
+async function setupTelegramWebhook() {
 
-app.post('/telegram/webhook', async (req, res) => {
+  if (!BOT_TOKEN) {
 
-  // Telegram needs a quick response
-  res.sendStatus(200);
+    console.log(
+      'TELEGRAM_BOT_TOKEN is missing'
+    );
+
+    return;
+  }
+
+  const webhookUrl =
+    'https://sinaps-backend.onrender.com/telegram/webhook';
 
   try {
 
-    const update = req.body;
-    const message = update?.message;
-
-    if (!message?.chat?.id) return;
-
-    // Only private chats
-    if (message.chat.type !== 'private') return;
-
-    const text = String(message.text || '');
-
-    // Handle /start and /start payload
-    if (!/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
-      return;
-    }
-
-    const chatId = message.chat.id;
-
-    const photoUrl =
-      'https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true';
-
-    const miniAppUrl =
-      'https://sadeghi1315.github.io/sinaps-tap-to-earn/';
-
-    await telegramApi('sendPhoto', {
-
-      chat_id: chatId,
-
-      photo: photoUrl,
-
-      caption:
-`🚀 Welcome to SINAPS
-
-Tap • Earn • Grow
-
-Start earning SNP and build your SINAPS balance.
-
-🎁 Daily Rewards
-⚡ Boosts
-👥 Referral Rewards
-💎 TON Wallet
-
-Your SINAPS journey starts here.`,
-
-      reply_markup: {
-
-        inline_keyboard: [
-
-          [
-            {
-              text: '🚀 START SINAPS',
-
-              web_app: {
-                url: miniAppUrl
-              }
-            }
-          ]
-
-        ]
-
+    const result = await telegramApi(
+      'setWebhook',
+      {
+        url: webhookUrl
       }
+    );
 
-    });
+    console.log(
+      'Telegram webhook:',
+      result
+    );
 
   } catch (e) {
 
     console.error(
-      'Telegram /start error:',
+      'Telegram webhook setup failed:',
       e
     );
 
   }
 
-});
+}
+
 
 // ============================================================
 // START SERVER
@@ -4341,6 +4297,5 @@ async function start() {
   }
 
 }
-
 
 start();
