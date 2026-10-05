@@ -56,6 +56,7 @@ if (!DB_URL || !DB_TOKEN || !BOT_TOKEN) {
   process.exit(1);
 }
 
+
 const db = createClient({
   url: DB_URL,
   authToken: DB_TOKEN
@@ -1287,7 +1288,7 @@ async function initDB() {
             FROM users
             WHERE referral_code = ?
             LIMIT 1
-          `,
+            `,
 
           args: [code]
 
@@ -1440,25 +1441,13 @@ app.post(
         message.chat.id;
 
 
-      // ========================================================
-      // SINAPS WELCOME IMAGE
-      // ========================================================
-
       const photoUrl =
         "https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true";
 
 
-      // ========================================================
-      // SINAPS MINI APP
-      // ========================================================
-
       const miniAppUrl =
         "https://sadeghi1315.github.io/sinaps-tap-to-earn/";
 
-
-      // ========================================================
-      // SEND WELCOME MESSAGE
-      // ========================================================
 
       await telegramApi(
         "sendPhoto",
@@ -1599,7 +1588,7 @@ app.get(
 
       status: "online",
 
-      version: "4.1.1"
+      version: "4.1.2"
 
     });
 
@@ -2399,6 +2388,248 @@ app.post(
 
 
 // ============================================================
+// DAILY HELPERS
+// ============================================================
+
+function getDailyStatus(user) {
+
+  const today =
+    dateOnly();
+
+  const last =
+    user?.last_daily_bonus
+      ? String(
+          user.last_daily_bonus
+        ).slice(0, 10)
+      : null;
+
+  const streak =
+    Math.max(
+      0,
+      Number(
+        user?.daily_streak || 0
+      )
+    );
+
+  const claimedToday =
+    last === today;
+
+  let nextDay = 1;
+
+
+  if (claimedToday) {
+
+    nextDay =
+      Math.max(
+        1,
+        Math.min(
+          30,
+          streak
+        )
+      );
+
+  } else if (
+    last &&
+    dayDifference(
+      last,
+      today
+    ) === 1
+  ) {
+
+    nextDay =
+      Math.max(
+        1,
+        Math.min(
+          30,
+          streak + 1
+        )
+      );
+
+  } else {
+
+    nextDay = 1;
+
+  }
+
+
+  if (nextDay > 30) {
+    nextDay = 1;
+  }
+
+
+  let claimedThrough = 0;
+
+
+  if (claimedToday) {
+
+    claimedThrough =
+      Math.min(
+        30,
+        Math.max(
+          0,
+          streak
+        )
+      );
+
+  } else if (
+    last &&
+    dayDifference(
+      last,
+      today
+    ) === 1
+  ) {
+
+    claimedThrough =
+      Math.min(
+        30,
+        Math.max(
+          0,
+          streak
+        )
+      );
+
+  }
+
+
+  const claimedDays =
+    Array.from(
+      {
+        length:
+          claimedThrough
+      },
+      (_, i) =>
+        i + 1
+    );
+
+
+  return {
+
+    streak,
+
+    daily_streak:
+      streak,
+
+    current_streak:
+      streak,
+
+    last_claim_date:
+      last,
+
+    last_daily_bonus:
+      last,
+
+    claimed_today:
+      claimedToday,
+
+    claimedToday,
+
+    today_claimed:
+      claimedToday,
+
+    todayClaimed:
+      claimedToday,
+
+    is_claimed:
+      claimedToday,
+
+    isClaimed:
+      claimedToday,
+
+    can_claim:
+      !claimedToday,
+
+    canClaim:
+      !claimedToday,
+
+    currentDay:
+      claimedToday
+        ? Math.max(
+            1,
+            Math.min(
+              30,
+              streak
+            )
+          )
+        : nextDay,
+
+    nextDay,
+
+    reward:
+      nextDay * 10,
+
+    claimedDays
+
+  };
+
+}
+
+
+// ============================================================
+// DAILY GET
+// ============================================================
+
+app.get(
+  "/api/daily",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        requireAuth(req, res);
+
+      if (!verified) {
+        return;
+      }
+
+      const user =
+        await getUser(
+          verified.id
+        );
+
+      if (!user) {
+
+        return res.status(404).json({
+          error:
+            "User not found"
+        });
+
+      }
+
+      const daily =
+        getDailyStatus(user);
+
+      res.json({
+
+        ok: true,
+
+        daily,
+
+        ...daily
+
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "/api/daily",
+        error
+      );
+
+      res.status(500).json({
+
+        error:
+          "Daily status failed"
+
+      });
+
+    }
+
+  }
+);
+
+
+// ============================================================
 // DAILY STATUS
 // ============================================================
 
@@ -2420,96 +2651,23 @@ app.get(
           verified.id
         );
 
-      const today =
-        dateOnly();
+      if (!user) {
 
-      const last =
-        user?.last_daily_bonus
-          ? String(
-              user.last_daily_bonus
-            ).slice(0, 10)
-          : null;
-
-      const claimedToday =
-        last === today;
-
-      let nextDay = 1;
-
-      if (claimedToday) {
-
-        nextDay =
-          Number(
-            user.daily_streak || 1
-          );
-
-      } else if (
-        last &&
-        dayDifference(
-          last,
-          today
-        ) === 1
-      ) {
-
-        nextDay =
-          Number(
-            user.daily_streak || 0
-          ) + 1;
+        return res.status(404).json({
+          error:
+            "User not found"
+        });
 
       }
 
-      if (nextDay > 30) {
-        nextDay = 1;
-      }
-
-      const streak =
-        Number(
-          user?.daily_streak || 0
-        );
-
-      const claimedThrough =
-        claimedToday
-          ? Math.min(
-              30,
-              streak
-            )
-          : (
-              last &&
-              dayDifference(
-                last,
-                today
-              ) === 1
-            )
-            ? Math.max(
-                0,
-                nextDay - 1
-              )
-            : 0;
-
-      const claimedDays =
-        Array.from(
-          {
-            length:
-              claimedThrough
-          },
-          (_, i) =>
-            i + 1
-        );
+      const daily =
+        getDailyStatus(user);
 
       res.json({
 
         ok: true,
 
-        claimedToday,
-
-        currentDay:
-          streak,
-
-        nextDay,
-
-        reward:
-          nextDay * 10,
-
-        claimedDays
+        ...daily
 
       });
 
@@ -2522,8 +2680,10 @@ app.get(
       );
 
       res.status(500).json({
+
         error:
           "Daily status failed"
+
       });
 
     }
@@ -2566,6 +2726,7 @@ app.post(
 
       }
 
+
       const today =
         dateOnly();
 
@@ -2576,34 +2737,96 @@ app.post(
             ).slice(0, 10)
           : null;
 
+
+      // --------------------------------------------------------
+      // ALREADY CLAIMED TODAY
+      // --------------------------------------------------------
+
       if (last === today) {
 
+        const daily =
+          getDailyStatus(user);
+
         return res.status(400).json({
+
+          ok: false,
+
           error:
-            "Daily reward already claimed"
+            "Daily reward already claimed",
+
+          claimed_today:
+            true,
+
+          claimedToday:
+            true,
+
+          today_claimed:
+            true,
+
+          todayClaimed:
+            true,
+
+          is_claimed:
+            true,
+
+          isClaimed:
+            true,
+
+          can_claim:
+            false,
+
+          canClaim:
+            false,
+
+          last_claim_date:
+            last,
+
+          daily
+
         });
 
       }
 
-      let day =
-        (
-          last &&
-          dayDifference(
-            last,
-            today
-          ) === 1
-        )
-          ? Number(
-              user.daily_streak || 0
-            ) + 1
-          : 1;
+
+      // --------------------------------------------------------
+      // CALCULATE DAY
+      // --------------------------------------------------------
+
+      let day = 1;
+
+
+      if (
+        last &&
+        dayDifference(
+          last,
+          today
+        ) === 1
+      ) {
+
+        day =
+          Number(
+            user.daily_streak || 0
+          ) + 1;
+
+      } else {
+
+        day = 1;
+
+      }
+
 
       if (day > 30) {
         day = 1;
       }
 
+
       const reward =
         day * 10;
+
+
+      // --------------------------------------------------------
+      // ATOMIC DAILY UPDATE
+      // --------------------------------------------------------
 
       const updated =
         await db.execute({
@@ -2621,7 +2844,9 @@ app.post(
               AND
               (
                 last_daily_bonus IS NULL
+
                 OR
+
                 substr(
                   last_daily_bonus,
                   1,
@@ -2631,23 +2856,55 @@ app.post(
           `,
 
           args: [
+
             reward,
+
             day,
+
             today,
+
             telegramId,
+
             today
+
           ]
 
         });
 
-      if (!updated.rowsAffected) {
+
+      if (
+        Number(
+          updated.rowsAffected || 0
+        ) !== 1
+      ) {
 
         return res.status(409).json({
+
+          ok: false,
+
           error:
-            "Daily reward already claimed"
+            "Daily reward already claimed",
+
+          claimed_today:
+            true,
+
+          claimedToday:
+            true,
+
+          can_claim:
+            false,
+
+          canClaim:
+            false
+
         });
 
       }
+
+
+      // --------------------------------------------------------
+      // DAILY HISTORY
+      // --------------------------------------------------------
 
       await db.execute({
 
@@ -2663,13 +2920,23 @@ app.post(
         `,
 
         args: [
+
           telegramId,
+
           day,
+
           reward,
+
           now()
+
         ]
 
       });
+
+
+      // --------------------------------------------------------
+      // TRANSACTION
+      // --------------------------------------------------------
 
       await addTransaction(
 
@@ -2685,16 +2952,41 @@ app.post(
 
       );
 
+
+      // --------------------------------------------------------
+      // REFERRAL BONUS
+      // --------------------------------------------------------
+
       await rewardReferralOwner(
+
         telegramId,
+
         reward,
+
         "DAILY"
+
       );
+
+
+      // --------------------------------------------------------
+      // FRESH USER
+      // --------------------------------------------------------
 
       const fresh =
         await getUser(
           telegramId
         );
+
+
+      const daily =
+        getDailyStatus(
+          fresh
+        );
+
+
+      // --------------------------------------------------------
+      // RESPONSE
+      // --------------------------------------------------------
 
       res.json({
 
@@ -2707,7 +2999,47 @@ app.post(
         balance:
           Number(
             fresh.balance || 0
-          )
+          ),
+
+        claimed_today:
+          true,
+
+        claimedToday:
+          true,
+
+        today_claimed:
+          true,
+
+        todayClaimed:
+          true,
+
+        is_claimed:
+          true,
+
+        isClaimed:
+          true,
+
+        can_claim:
+          false,
+
+        canClaim:
+          false,
+
+        last_claim_date:
+          String(
+            fresh.last_daily_bonus ||
+            today
+          ).slice(0, 10),
+
+        last_daily_bonus:
+          fresh.last_daily_bonus,
+
+        streak:
+          Number(
+            fresh.daily_streak || day
+          ),
+
+        daily
 
       });
 
@@ -2720,8 +3052,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "Daily claim failed"
+
       });
 
     }
@@ -3085,6 +3419,7 @@ app.post(
         });
 
       }
+
 
       if (
         task.type ===
@@ -4101,7 +4436,7 @@ async function start() {
       () => {
 
         console.log(
-          `SINAPS backend v4.1.1 running on ${PORT}`
+          `SINAPS backend v4.1.2 running on ${PORT}`
         );
 
       }
