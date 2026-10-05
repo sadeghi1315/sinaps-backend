@@ -1460,6 +1460,43 @@ async function isTelegramMember(
 }
 
 
+// ===============================
+// TELEGRAM /START WELCOME MESSAGE
+// ===============================
+
+app.post('/telegram/webhook', async (req, res) => {
+  // Telegram needs a quick response
+  res.sendStatus(200);
+
+  try {
+    const update = req.body;
+    const message = update?.message;
+
+    if (!message?.chat?.id) return;
+    if (message.chat.type !== 'private') return;
+
+    const text = String(message.text || '');
+
+    // Handles /start and /start payload
+    if (!/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)) return;
+
+    const chatId = message.chat.id;
+
+    // URL of the SINAPS image
+    const photoUrl =
+      'https://sadeghi1315.github.io/sinaps-tap-to-earn/logo.png';
+
+    await telegramApi('sendPhoto', {
+      chat_id: chatId,
+      photo: photoUrl,
+      caption: '🚀 Welcome to SINAPS'
+    });
+
+  } catch (e) {
+    console.error('Telegram /start error:', e);
+  }
+});
+
 // ============================================================
 // SNP HOLDER CHECK
 // ============================================================
