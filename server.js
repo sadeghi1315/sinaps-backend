@@ -4217,7 +4217,30 @@ async function start() {
   try {
 
     await initDB();
+// ===============================
+// SET TELEGRAM WEBHOOK
+// ===============================
 
+async function setupTelegramWebhook() {
+  if (!BOT_TOKEN) {
+    console.log('TELEGRAM_BOT_TOKEN is missing');
+    return;
+  }
+
+  const webhookUrl =
+    'https://sinaps-backend.onrender.com/telegram/webhook';
+
+  try {
+    const result = await telegramApi('setWebhook', {
+      url: webhookUrl
+    });
+
+    console.log('Telegram webhook:', result);
+  } catch (e) {
+    console.error('Telegram webhook setup failed:', e);
+  }
+}
+  setupTelegramWebhook();  
 
     app.listen(
       PORT,
