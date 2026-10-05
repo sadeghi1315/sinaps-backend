@@ -61,7 +61,6 @@ const db = createClient({
   authToken: DB_TOKEN
 });
 
-
 // ============================================================
 // BOOSTS
 // ============================================================
@@ -71,25 +70,25 @@ const BOOST_LEVELS = {
   tap: [
     {
       level: 2,
-      price: 200,
+      price: 2000,
       name: "Tap ×2",
       description: "2 SNP per tap"
     },
     {
       level: 3,
-      price: 300,
+      price: 3000,
       name: "Tap ×3",
       description: "3 SNP per tap"
     },
     {
       level: 4,
-      price: 500,
+      price: 5000,
       name: "Tap ×4",
       description: "4 SNP per tap"
     },
     {
       level: 5,
-      price: 800,
+      price: 8000,
       name: "Tap ×5",
       description: "5 SNP per tap"
     }
@@ -98,25 +97,25 @@ const BOOST_LEVELS = {
   energy: [
     {
       level: 2,
-      price: 200,
+      price: 2000,
       name: "Energy ×2",
       description: "Maximum 2,000 energy"
     },
     {
       level: 3,
-      price: 350,
+      price: 3500,
       name: "Energy ×3",
       description: "Maximum 3,000 energy"
     },
     {
       level: 4,
-      price: 600,
+      price: 6000,
       name: "Energy ×4",
       description: "Maximum 4,000 energy"
     },
     {
       level: 5,
-      price: 1000,
+      price: 10000,
       name: "Energy ×5",
       description: "Maximum 5,000 energy"
     }
@@ -125,32 +124,31 @@ const BOOST_LEVELS = {
   recharge: [
     {
       level: 2,
-      price: 150,
+      price: 1500,
       name: "Recharge ×2",
       description: "Energy regenerates 2× faster"
     },
     {
       level: 3,
-      price: 300,
+      price: 3000,
       name: "Recharge ×3",
       description: "Energy regenerates 3× faster"
     },
     {
       level: 4,
-      price: 450,
+      price: 4500,
       name: "Recharge ×4",
       description: "Energy regenerates 4× faster"
     },
     {
       level: 5,
-      price: 650,
+      price: 6500,
       name: "Recharge ×5",
       description: "Energy regenerates 5× faster"
     }
   ]
 
 };
-
 
 // ============================================================
 // TASKS
