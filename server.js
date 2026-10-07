@@ -4,8 +4,8 @@ const crypto = require("crypto");
 const { createClient } = require("@libsql/client");
 const {
   TonClient,
-  WalletContractV4,
-  WalletContractV3R2,
+  WalletContractV5R1,
+  SendMode,
   internal,
   beginCell,
   Address
@@ -3837,158 +3837,112 @@ app.get(
 // ============================================================
 // SNP PAYOUT ENGINE
 // ============================================================
-let treasuryTonClient = null;
-let treasuryWallet = null;
-let treasuryKeyPair = null;
-let treasuryJettonWallet = null;
-let treasuryInitPromise = null;
-
-async function initTreasuryPayout() {
-  if (treasuryInitPromise) return treasuryInitPromise;
-  treasuryInitPromise = (async () => {
-    if (!TREASURY_MNEMONIC) throw new Error("TREASURY_MNEMONIC is not configured");
-    const words = TREASURY_MNEMONIC.trim().split(/\s+/).filter(Boolean);
-    if (words.length < 12) throw new Error("TREASURY_MNEMONIC is invalid");
-
-    treasuryKeyPair = await mnemonicToPrivateKey(words);
-    treasuryTonClient = new TonClient({ endpoint: TON_RPC, apiKey: TONCENTER_API_KEY || undefined });
-    const expected = Address.parse(TREASURY_WALLET);
-
-const walletV4 = WalletContractV4.create({
-  workchain: 0,
-  publicKey: treasuryKeyPair.publicKey
-});
-
-const walletV3 = WalletContractV3R2.create({
-  workchain: 0,
-  publicKey: treasuryKeyPair.publicKey
-});
-
-const expectedRaw = expected.toRawString();
-
-console.log("Treasury expected:", expectedRaw);
-console.log("Seed V4 address:", walletV4.address.toRawString());
-console.log("Seed V3R2 address:", walletV3.address.toRawString());
-
-if (walletV4.address.toRawString() === expectedRaw) {
-  treasuryWallet = walletV4;
-  console.log("TREASURY WALLET TYPE: V4R2");
-} else if (walletV3.address.toRawString() === expectedRaw) {
-  treasuryWallet = walletV3;
-  console.log("TREASURY WALLET TYPE: V3R2");
-} else {
-  throw new Error(
-    "TREASURY_MNEMONIC does not match Treasury address in V3R2 or V4R2"
-  );
-}
-    
-
-    // Derive the treasury's SNP Jetton wallet address through the Jetton master getter.
-    const { JettonMaster } = require("@ton/ton");
-    const master = treasuryTonClient.open(JettonMaster.create(Address.parse(SNP_CONTRACT)));
-    treasuryJettonWallet = await master.getWalletAddress(expected);
-    return true;
-  })();
-  try { return await treasuryInitPromise; }
-  catch (e) { treasuryInitPromise = null; throw e; }
-}
-
-function snpRaw(amount) {
-  return BigInt(Math.trunc(Number(amount))) * (10n ** BigInt(SNP_DECIMALS));
-}
-
-function normalizeTonAddress(value) {
-  try {
-    return Address.parse(String(value || "")).toRawString();
-  } catch (_) {
-    return String(value || "").trim();
-  }
-}
-
-async function findFeePayment(withdrawal) {
-  const createdAt = Math.floor(Date.parse(String(withdrawal.created_at || "")) / 1000);
-  const startUtime = Number.isFinite(createdAt) && createdAt > 0
-    ? Math.max(0, createdAt - 30)
-    : Math.max(0, Math.floor(Date.now() / 1000) - 900);
-
-  const headers = TONCENTER_API_KEY
-    ? { "X-API-Key": TONCENTER_API_KEY }
-    : {};
-
-  const url = new URL(`${TONCENTER}/transactions`);
-  url.searchParams.set("account", TREASURY_WALLET);
-  url.searchParams.set("start_utime", String(startUtime));
-  url.searchParams.set("limit", "100");
-  url.searchParams.set("sort", "desc");
-
-  const response = await fetch(url, { headers });
-  if (!response.ok) {
-    throw new Error(`TON Center transaction lookup failed (${response.status})`);
-  }
-
-  const data = await response.json();
-  const transactions = Array.isArray(data.transactions) ? data.transactions : [];
-
-  const expectedSource = normalizeTonAddress(withdrawal.wallet_address);
-  const expectedDestination = normalizeTonAddress(TREASURY_WALLET);
-  const expectedNano = BigInt(String(withdrawal.fee_nano || FEE_NANO));
-
-  for (const tx of transactions) {
-    const msg = tx?.in_msg;
-    if (!msg) continue;
-    if (normalizeTonAddress(msg.destination) !== expectedDestination) continue;
-    if (normalizeTonAddress(msg.source) !== expectedSource) continue;
-    if (msg.bounced === true) continue;
-
-    let value = 0n;
-    try { value = BigInt(String(msg.value || "0")); } catch (_) { continue; }
-    if (value < expectedNano) continue;
-
-    const txTime = Number(tx.now || msg.created_at || 0);
-    if (txTime && txTime < startUtime) continue;
-
-    return {
-      tx_hash: String(tx.hash || msg.hash || ""),
-      msg_hash: String(msg.hash || ""),
-      value: value.toString(),
-      now: txTime || Math.floor(Date.now() / 1000)
-    };
-  }
-
-  return null;
-}
-
-async function sendSnpPayout(destination, amount, withdrawalId) {
+async function sendSnpPayout(
+  destination,
+  amount,
+  withdrawalId
+) {
   await initTreasuryPayout();
-  const destinationAddress = Address.parse(destination);
-  const seqno = await treasuryTonClient.open(treasuryWallet).getSeqno();
-  const queryId = BigInt(Date.now());
 
-  // Standard Jetton transfer payload (TEP-74).
-  const body = beginCell()
-    .storeUint(0x0f8a7ea5, 32)
-    .storeUint(queryId, 64)
-    .storeCoins(snpRaw(amount))
-    .storeAddress(destinationAddress)
-    .storeAddress(Address.parse(TREASURY_WALLET))
-    .storeBit(0)
-    .storeCoins(0)
-    .storeBit(0)
-    .endCell();
+  if (!treasuryWallet) {
+    throw new Error(
+      "Treasury W5 wallet is not initialized"
+    );
+  }
 
-  const openedWallet = treasuryTonClient.open(treasuryWallet);
-  await openedWallet.sendTransfer({
-    seqno,
-    secretKey: treasuryKeyPair.secretKey,
-    messages: [internal({
-      to: treasuryJettonWallet,
-      value: TREASURY_JETTON_GAS,
-      bounce: true,
-      body
-    })]
-  });
+  if (!treasuryJettonWallet) {
+    throw new Error(
+      "Treasury SNP Jetton Wallet is not initialized"
+    );
+  }
 
-  return { query_id: queryId.toString(), treasury_jetton_wallet: treasuryJettonWallet.toString() };
+  const destinationAddress =
+    Address.parse(destination);
+
+  const openedWallet =
+    treasuryTonClient.open(treasuryWallet);
+
+  const seqno =
+    await openedWallet.getSeqno();
+
+  const queryId =
+    BigInt(Date.now());
+
+  const body =
+    beginCell()
+      .storeUint(0x0f8a7ea5, 32)
+      .storeUint(queryId, 64)
+      .storeCoins(snpRaw(amount))
+      .storeAddress(destinationAddress)
+      .storeAddress(Address.parse(TREASURY_WALLET))
+      .storeBit(0)
+      .storeCoins(0)
+      .storeBit(0)
+      .endCell();
+
+  console.log("=================================");
+  console.log("SNP PAYOUT");
+  console.log("Withdrawal:", withdrawalId);
+  console.log("Amount:", amount, "SNP");
+  console.log("Destination:", destinationAddress.toString());
+  console.log("Treasury:", TREASURY_WALLET);
+  console.log("Jetton wallet:", treasuryJettonWallet.toString());
+  console.log("Seqno:", seqno);
+  console.log("Query ID:", queryId.toString());
+  console.log("=================================");
+
+  const transfer =
+    openedWallet.createTransfer({
+      seqno,
+
+      secretKey:
+        treasuryKeyPair.secretKey,
+
+      messages: [
+        internal({
+          to: treasuryJettonWallet,
+
+          value:
+            TREASURY_JETTON_GAS,
+
+          bounce: true,
+
+          body
+        })
+      ],
+
+      sendMode:
+        SendMode.PAY_GAS_SEPARATELY,
+
+      timeout:
+        Math.floor(Date.now() / 1000) + 120
+    });
+
+  await openedWallet.send(transfer);
+
+  console.log(
+    "SNP PAYOUT TRANSACTION SUBMITTED"
+  );
+
+  return {
+    query_id:
+      queryId.toString(),
+
+    treasury_wallet:
+      treasuryWallet.address.toString(),
+
+    treasury_jetton_wallet:
+      treasuryJettonWallet.toString(),
+
+    destination:
+      destinationAddress.toString(),
+
+    amount:
+      String(amount),
+
+    withdrawal_id:
+      withdrawalId
+  };
 }
 
 // ============================================================
