@@ -121,17 +121,13 @@ const db =
 
 
 // ============================================================
-// TREASURY PAYOUT STATE
+// TREASURY STATE
 // ============================================================
 
 let treasuryInitPromise = null;
-
 let treasuryKeyPair = null;
-
 let treasuryTonClient = null;
-
 let treasuryWallet = null;
-
 let treasuryJettonWallet = null;
 
 
@@ -142,665 +138,215 @@ let treasuryJettonWallet = null;
 const BOOST_LEVELS = {
 
   tap: [
-
     {
       level: 2,
       price: 2000,
       name: "Tap ×2",
       description: "2 SNP per tap"
     },
-
     {
       level: 3,
       price: 3000,
       name: "Tap ×3",
       description: "3 SNP per tap"
     },
-
     {
       level: 4,
       price: 5000,
       name: "Tap ×4",
       description: "4 SNP per tap"
     },
-
     {
       level: 5,
       price: 8000,
       name: "Tap ×5",
       description: "5 SNP per tap"
     }
-
   ],
 
   energy: [
-
     {
       level: 2,
       price: 2000,
       name: "Energy ×2",
       description: "Maximum 2,000 energy"
     },
-
     {
       level: 3,
       price: 3500,
       name: "Energy ×3",
       description: "Maximum 3,000 energy"
     },
-
     {
       level: 4,
       price: 6000,
       name: "Energy ×4",
       description: "Maximum 4,000 energy"
     },
-
     {
       level: 5,
       price: 10000,
       name: "Energy ×5",
       description: "Maximum 5,000 energy"
     }
-
   ],
 
   recharge: [
-
     {
       level: 2,
       price: 1500,
       name: "Recharge ×2",
       description: "Energy regenerates 2× faster"
     },
-
     {
       level: 3,
       price: 3000,
       name: "Recharge ×3",
       description: "Energy regenerates 3× faster"
     },
-
     {
       level: 4,
       price: 4500,
       name: "Recharge ×4",
       description: "Energy regenerates 4× faster"
     },
-
     {
       level: 5,
       price: 6500,
       name: "Recharge ×5",
       description: "Energy regenerates 5× faster"
     }
-
   ]
 
 };
 
 
 // ============================================================
-// TASKS
+// EXACT 9 SINAPS TASKS
 // ============================================================
 
-app.get(
-  "/api/tasks",
-  async (req, res) => {
+const TASKS = [
 
-    try {
+  {
+    id: "channel",
+    name: "Join SINAPS Channel",
+    title: "Join SINAPS Channel",
+    icon: "📢",
+    reward: 100,
+    type: "telegram",
+    chat: "@SINAPS_COIN",
+    url: "https://t.me/SINAPS_COIN"
+  },
 
-      const verified =
-        requireAuth(req, res);
+  {
+    id: "group",
+    name: "Join SINAPS Group",
+    title: "Join SINAPS Group",
+    icon: "👥",
+    reward: 70,
+    type: "telegram",
+    chat: "@SINAPS_Group",
+    url: "https://t.me/SINAPS_Group"
+  },
 
-      if (!verified) {
-        return;
-      }
+  {
+    id: "holder",
+    name: "Hold 50,000 SNP",
+    title: "Hold 50,000 SNP",
+    icon: "💎",
+    reward: 1000,
+    type: "holder",
+    required: HOLDER_MIN_SNP,
+    url: "#"
+  },
 
-      const telegramId =
-        String(verified.id);
+  {
+    id: "twitter",
+    name: "Follow SINAPS on X",
+    title: "Follow SINAPS on X",
+    icon: "𝕏",
+    reward: 100,
+    type: "external",
+    url: "https://x.com/SINAPS_COIN"
+  },
 
-      // Tasks already claimed by this user
-      const claimedResult =
-        await db.execute({
-          sql: `
-            SELECT task_id
-            FROM task_claims
-            WHERE telegram_id = ?
-          `,
-          args: [telegramId]
-        });
+  {
+    id: "like_retweet",
+    name: "Like & Repost SINAPS",
+    title: "Like & Repost SINAPS",
+    icon: "❤️",
+    reward: 50,
+    type: "external",
+    url: "https://x.com/SINAPS_COIN"
+  },
 
-      const claimed =
-        new Set(
-          claimedResult.rows.map(
-            row => String(row.task_id)
-          )
-        );
+  {
+    id: "connect_wallet",
+    name: "Connect TON Wallet",
+    title: "Connect TON Wallet",
+    icon: "💎",
+    reward: 50,
+    type: "wallet",
+    url: "#"
+  },
 
-      // Real referral count
-      const referralResult =
-        await db.execute({
-          sql: `
-            SELECT COUNT(*) AS total
-            FROM users
-            WHERE referred_by = ?
-          `,
-          args: [telegramId]
-        });
+  {
+    id: "invite_3",
+    name: "Invite 3 Friends",
+    title: "Invite 3 Friends",
+    icon: "👥",
+    reward: 300,
+    type: "referral",
+    required: 3,
+    url: "#"
+  },
 
-      const referralCount =
-        Number(
-          referralResult.rows[0]?.total || 0
-        );
+  {
+    id: "invite_10",
+    name: "Invite 10 Friends",
+    title: "Invite 10 Friends",
+    icon: "🔥",
+    reward: 1500,
+    type: "referral",
+    required: 10,
+    url: "#"
+  },
 
-      const tasks =
-        TASKS.map(task => {
-
-          let completed =
-            claimed.has(task.id);
-
-          /*
-           * Referral tasks:
-           * They are NOT considered completed just because
-           * the button was pressed.
-           *
-           * They must have the required number of real referrals.
-           */
-          if (
-            task.type === "referral"
-          ) {
-
-            const required =
-              Number(task.required || 0);
-
-            // If user has not reached the requirement,
-            // it can never show DONE.
-            if (
-              referralCount < required
-            ) {
-              completed = false;
-            }
-
-          }
-
-          return {
-            ...task,
-
-            completed,
-
-            referral_count:
-              task.type === "referral"
-                ? referralCount
-                : undefined,
-
-            action:
-              task.type === "holder"
-                ? "VERIFY"
-                : task.type === "wallet"
-                  ? "CONNECT"
-                  : task.type === "referral"
-                    ? "VERIFY"
-                    : "VERIFY"
-          };
-
-        });
-
-      res.json({
-        ok: true,
-        tasks
-      });
-
-    } catch (error) {
-
-      console.error(
-        "/api/tasks",
-        error
-      );
-
-      res.status(500).json({
-        error:
-          "Tasks could not be loaded"
-      });
-
-    }
-
+  {
+    id: "invite_15",
+    name: "Invite 15 Friends",
+    title: "Invite 15 Friends",
+    icon: "🚀",
+    reward: 3000,
+    type: "referral",
+    required: 15,
+    url: "#"
   }
-);
 
+];
 
-// ============================================================
-// TASK CLAIM
-// ============================================================
 
-app.post(
-  "/api/tasks/claim",
-  async (req, res) => {
-
-    try {
-
-      const verified =
-        requireAuth(req, res);
-
-      if (!verified) {
-        return;
-      }
-
-      const telegramId =
-        String(verified.id);
-
-      const taskId =
-        String(
-          req.body.task_id || ""
-        ).trim();
-
-      const requestedWallet =
-        String(
-          req.body.wallet_address || ""
-        ).trim();
-
-      const task =
-        TASKS.find(
-          item =>
-            String(item.id) === taskId
-        );
-
-      if (!task) {
-
-        return res.status(400).json({
-          error:
-            "Unknown task"
-        });
-
-      }
-
-
-      // --------------------------------------------------------
-      // PREVENT DOUBLE CLAIM
-      // --------------------------------------------------------
-
-      const already =
-        await db.execute({
-          sql: `
-            SELECT id
-            FROM task_claims
-            WHERE telegram_id = ?
-              AND task_id = ?
-            LIMIT 1
-          `,
-          args: [
-            telegramId,
-            taskId
-          ]
-        });
-
-      if (
-        already.rows.length
-      ) {
-
-        return res.status(400).json({
-          error:
-            "Task already completed",
-          already_completed:
-            true
-        });
-
-      }
-
-
-      // --------------------------------------------------------
-      // REFERRAL TASKS
-      // --------------------------------------------------------
-
-      if (
-        task.type === "referral"
-      ) {
-
-        const required =
-          Number(
-            task.required || 0
-          );
-
-        if (
-          required <= 0
-        ) {
-
-          return res.status(400).json({
-            error:
-              "Invalid referral requirement"
-          });
-
-        }
-
-        // IMPORTANT:
-        // Count real users whose referred_by points
-        // to the current Telegram user.
-        const referralResult =
-          await db.execute({
-            sql: `
-              SELECT COUNT(*) AS total
-              FROM users
-              WHERE referred_by = ?
-            `,
-            args: [
-              telegramId
-            ]
-          });
-
-        const referralCount =
-          Number(
-            referralResult.rows[0]?.total || 0
-          );
-
-        console.log(
-          "REFERRAL TASK CHECK:",
-          {
-            telegramId,
-            taskId,
-            required,
-            referralCount
-          }
-        );
-
-        if (
-          referralCount < required
-        ) {
-
-          return res.status(400).json({
-
-            error:
-              `You need ${required} referrals. You currently have ${referralCount}.`,
-
-            required,
-
-            referral_count:
-              referralCount
-
-          });
-
-        }
-
-      }
-
-
-      // --------------------------------------------------------
-      // WALLET TASK
-      // --------------------------------------------------------
-
-      if (
-        task.type === "wallet"
-      ) {
-
-        const user =
-          await getUser(
-            telegramId
-          );
-
-        const wallet =
-          requestedWallet ||
-          String(
-            user?.wallet_address || ""
-          ).trim();
-
-        if (!wallet) {
-
-          return res.status(400).json({
-            error:
-              "Connect your TON wallet first."
-          });
-
-        }
-
-      }
-
-
-      // --------------------------------------------------------
-      // HOLDER TASK
-      // --------------------------------------------------------
-
-      if (
-        task.type === "holder"
-      ) {
-
-        const user =
-          await getUser(
-            telegramId
-          );
-
-        const wallet =
-          requestedWallet ||
-          String(
-            user?.wallet_address || ""
-          ).trim();
-
-        if (!wallet) {
-
-          return res.status(400).json({
-            error:
-              "Connect your TON wallet first."
-          });
-
-        }
-
-        const holder =
-          await checkSnpBalance(
-            wallet
-          );
-
-        if (!holder) {
-
-          return res.status(400).json({
-
-            error:
-              `You need at least ${HOLDER_MIN_SNP.toLocaleString("en-US")} SNP in this wallet.`
-
-          });
-
-        }
-
-      }
-
-
-      // --------------------------------------------------------
-      // TELEGRAM TASKS
-      // --------------------------------------------------------
-
-      if (
-        task.type === "telegram"
-      ) {
-
-        if (!BOT_TOKEN) {
-
-          return res.status(500).json({
-            error:
-              "Telegram verification is not configured"
-          });
-
-        }
-
-        if (!task.chat) {
-
-          return res.status(400).json({
-            error:
-              "Telegram task configuration is missing"
-          });
-
-        }
-
-        const telegramResponse =
-          await fetch(
-            `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(task.chat)}&user_id=${encodeURIComponent(telegramId)}`
-          );
-
-        const telegramData =
-          await telegramResponse.json();
-
-        const status =
-          telegramData?.result?.status;
-
-        const verifiedMember =
-          telegramData?.ok === true &&
-          [
-            "member",
-            "administrator",
-            "creator"
-          ].includes(status);
-
-        if (!verifiedMember) {
-
-          return res.status(400).json({
-
-            error:
-              "You are not a member. Join the Telegram channel/group first."
-
-          });
-
-        }
-
-      }
-
-
-      // --------------------------------------------------------
-      // EXTERNAL TASKS
-      // --------------------------------------------------------
-
-      if (
-        task.type === "external"
-      ) {
-
-        /*
-         * X/Twitter cannot be reliably verified from the browser
-         * without an X API integration.
-         *
-         * Therefore this task is intentionally not treated
-         * as automatically verified here.
-         */
-
-        return res.status(400).json({
-
-          error:
-            "This X task requires manual/API verification."
-
-        });
-
-      }
-
-
-      // --------------------------------------------------------
-      // ALL CHECKS PASSED
-      // --------------------------------------------------------
-
-      await db.execute({
-
-        sql: `
-          INSERT INTO task_claims
-          (
-            telegram_id,
-            task_id,
-            reward,
-            status,
-            created_at
-          )
-          VALUES (?, ?, ?, ?, ?)
-        `,
-
-        args: [
-          telegramId,
-          task.id,
-          Number(task.reward || 0),
-          "Completed",
-          now()
-        ]
-
-      });
-
-
-      // Give reward
-      await rewardUser(
-
-        telegramId,
-
-        Number(
-          task.reward || 0
-        ),
-
-        "TASK",
-
-        task.name
-
-      );
-
-
-      const user =
-        await getUser(
-          telegramId
-        );
-
-
-      res.json({
-
-        ok: true,
-
-        task_id:
-          task.id,
-
-        reward:
-          Number(
-            task.reward || 0
-          ),
-
-        balance:
-          Number(
-            user?.balance || 0
-          )
-
-      });
-
-    } catch (error) {
-
-      console.error(
-        "/api/tasks/claim",
-        error
-      );
-
-      res.status(500).json({
-
-        error:
-          "Task verification failed"
-
-      });
-
-    }
-
-  }
-);
 // ============================================================
 // BASIC HELPERS
 // ============================================================
 
 function now() {
-
   return new Date().toISOString();
-
 }
 
 
 function dateOnly() {
-
   return new Date()
     .toISOString()
     .slice(0, 10);
-
 }
 
 
 function randomCode() {
-
   return crypto
     .randomBytes(5)
     .toString("hex")
     .toUpperCase();
-
 }
 
 
@@ -824,7 +370,6 @@ function parseTime(value) {
   return Number.isFinite(t)
     ? t
     : Date.now();
-
 }
 
 
@@ -841,7 +386,6 @@ function dayDifference(a, b) {
   return Math.round(
     (bb - aa) / 86400000
   );
-
 }
 
 
@@ -856,13 +400,8 @@ function safeInt(
   return Number.isFinite(n)
     ? Math.floor(n)
     : fallback;
-
 }
 
-
-// ============================================================
-// SNP RAW AMOUNT
-// ============================================================
 
 function snpRaw(amount) {
 
@@ -882,6 +421,14 @@ function snpRaw(amount) {
     Math.floor(value)
   ) *
     1000000000n;
+}
+
+
+function normalizeAddress(address) {
+
+  return Address.parse(
+    String(address).trim()
+  ).toRawString();
 
 }
 
@@ -992,13 +539,11 @@ function verifyTelegram(initData) {
     }
 
     return {
-
       id:
         String(user.id),
 
       username:
         user.username || ""
-
     };
 
   } catch (error) {
@@ -1009,7 +554,6 @@ function verifyTelegram(initData) {
     );
 
     return null;
-
   }
 
 }
@@ -1037,17 +581,14 @@ function requireAuth(
   if (!user?.id) {
 
     res.status(401).json({
-
       error:
         "Telegram authentication required"
-
     });
 
     return null;
   }
 
   return user;
-
 }
 
 
@@ -1072,14 +613,12 @@ async function getUser(
       args: [
         String(telegramId)
       ]
-
     });
 
   return (
     result.rows[0] ||
     null
   );
-
 }
 
 
@@ -1175,21 +714,13 @@ async function addTransaction(
     `,
 
     args: [
-
       String(telegramId),
-
       type,
-
       Number(amount),
-
       status,
-
       details || "",
-
       now()
-
     ]
-
   });
 
 }
@@ -1272,8 +803,7 @@ async function syncEnergy(
       ? now()
       : new Date(
           last +
-          gained *
-          interval
+          gained * interval
         ).toISOString();
 
   await db.execute({
@@ -1287,27 +817,45 @@ async function syncEnergy(
     `,
 
     args: [
-
       newEnergy,
-
       newTime,
-
       String(telegramId)
-
     ]
-
   });
 
   return getUser(
     telegramId
   );
-
 }
 
 
 // ============================================================
-// REFERRAL
+// REFERRALS
 // ============================================================
+
+async function getReferralCount(
+  telegramId
+) {
+
+  const result =
+    await db.execute({
+
+      sql: `
+        SELECT COUNT(*) AS total
+        FROM users
+        WHERE referred_by = ?
+      `,
+
+      args: [
+        String(telegramId)
+      ]
+    });
+
+  return Number(
+    result.rows[0]?.total || 0
+  );
+}
+
 
 async function rewardReferralOwner(
   telegramId,
@@ -1348,37 +896,23 @@ async function rewardReferralOwner(
       `,
 
       args: [
-
         bonus,
-
-        String(
-          user.referred_by
-        )
-
+        String(user.referred_by)
       ]
-
     });
 
   if (result.rowsAffected) {
 
     await addTransaction(
-
       user.referred_by,
-
       "REFERRAL",
-
       bonus,
-
       "Completed",
-
       `${source} referral bonus`
-
     );
-
   }
 
   return bonus;
-
 }
 
 
@@ -1388,45 +922,20 @@ async function qualifyReferral(
 
   try {
 
-    const userResult =
-      await db.execute({
+    const user =
+      await getUser(
+        telegramId
+      );
 
-        sql: `
-          SELECT
-            telegram_id,
-            referred_by,
-            wallet_address,
-            referral_rewarded
-          FROM users
-          WHERE telegram_id = ?
-          LIMIT 1
-        `,
-
-        args: [
-          String(telegramId)
-        ]
-
-      });
-
-    if (
-      !userResult.rows.length
-    ) {
+    if (!user) {
       return 0;
     }
-
-    const user =
-      userResult.rows[0];
 
     if (!user.referred_by) {
       return 0;
     }
 
-    if (
-      !user.wallet_address ||
-      String(
-        user.wallet_address
-      ).trim() === ""
-    ) {
+    if (!user.wallet_address) {
       return 0;
     }
 
@@ -1439,12 +948,8 @@ async function qualifyReferral(
     }
 
     if (
-      String(
-        user.referred_by
-      ) ===
-      String(
-        user.telegram_id
-      )
+      String(user.referred_by) ===
+      String(user.telegram_id)
     ) {
       return 0;
     }
@@ -1464,13 +969,9 @@ async function qualifyReferral(
         `,
 
         args: [
-
           String(telegramId),
-
           String(telegramId)
-
         ]
-
       });
 
     if (
@@ -1481,27 +982,12 @@ async function qualifyReferral(
       return 0;
     }
 
-    const referrerResult =
-      await db.execute({
+    const referrer =
+      await getUser(
+        user.referred_by
+      );
 
-        sql: `
-          SELECT telegram_id
-          FROM users
-          WHERE telegram_id = ?
-          LIMIT 1
-        `,
-
-        args: [
-          String(
-            user.referred_by
-          )
-        ]
-
-      });
-
-    if (
-      !referrerResult.rows.length
-    ) {
+    if (!referrer) {
 
       await db.execute({
 
@@ -1514,15 +1000,10 @@ async function qualifyReferral(
         args: [
           String(telegramId)
         ]
-
       });
 
       return 0;
-
     }
-
-    const referrer =
-      referrerResult.rows[0];
 
     await db.execute({
 
@@ -1533,15 +1014,9 @@ async function qualifyReferral(
       `,
 
       args: [
-
         REFERRAL_JOIN_REWARD,
-
-        String(
-          referrer.telegram_id
-        )
-
+        String(referrer.telegram_id)
       ]
-
     });
 
     await addTransaction(
@@ -1555,7 +1030,6 @@ async function qualifyReferral(
       "Completed",
 
       `Referral reward for user ${String(telegramId)} connecting TON wallet`
-
     );
 
     console.log(
@@ -1572,9 +1046,7 @@ async function qualifyReferral(
     );
 
     return 0;
-
   }
-
 }
 
 
@@ -1585,6 +1057,13 @@ async function rewardUser(
   details
 ) {
 
+  const value =
+    Number(amount || 0);
+
+  if (value <= 0) {
+    return;
+  }
+
   await db.execute({
 
     sql: `
@@ -1594,39 +1073,24 @@ async function rewardUser(
     `,
 
     args: [
-
-      Number(amount),
-
+      value,
       String(telegramId)
-
     ]
-
   });
 
   await addTransaction(
-
     telegramId,
-
     type,
-
-    amount,
-
+    value,
     "Completed",
-
     details
-
   );
 
   await rewardReferralOwner(
-
     telegramId,
-
-    amount,
-
+    value,
     type
-
   );
-
 }
 
 
@@ -1664,30 +1128,20 @@ async function ensureColumn(
         `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
       );
 
-      console.log(
-        `Added: ${table}.${column}`
-      );
-
     }
 
   } catch (error) {
 
     if (
-      String(
-        error.message || ""
-      )
+      String(error.message || "")
         .toLowerCase()
-        .includes(
-          "duplicate column"
-        )
+        .includes("duplicate column")
     ) {
       return;
     }
 
     throw error;
-
   }
-
 }
 
 
@@ -1696,6 +1150,7 @@ async function initDB() {
   console.log(
     "Initializing SINAPS database..."
   );
+
 
   await db.execute(`
 
@@ -1743,98 +1198,33 @@ async function initDB() {
 
   `);
 
-  const columns = [
 
-    [
-      "username",
-      "TEXT"
-    ],
+  const userColumns = [
 
-    [
-      "balance",
-      "INTEGER DEFAULT 0"
-    ],
-
-    [
-      "energy",
-      "INTEGER DEFAULT 1000"
-    ],
-
-    [
-      "max_energy",
-      "INTEGER DEFAULT 1000"
-    ],
-
-    [
-      "last_energy_update",
-      "TEXT"
-    ],
-
-    [
-      "created_at",
-      "TEXT"
-    ],
-
-    [
-      "last_daily_bonus",
-      "TEXT"
-    ],
-
-    [
-      "daily_streak",
-      "INTEGER DEFAULT 0"
-    ],
-
-    [
-      "referral_code",
-      "TEXT"
-    ],
-
-    [
-      "referred_by",
-      "TEXT"
-    ],
-
-    [
-      "wallet_address",
-      "TEXT"
-    ],
-
-    [
-      "tap_power",
-      "INTEGER DEFAULT 1"
-    ],
-
-    [
-      "tap_boost_level",
-      "INTEGER DEFAULT 1"
-    ],
-
-    [
-      "energy_boost_level",
-      "INTEGER DEFAULT 1"
-    ],
-
-    [
-      "recharge_multiplier",
-      "INTEGER DEFAULT 1"
-    ],
-
-    [
-      "recharge_level",
-      "INTEGER DEFAULT 1"
-    ],
-
-    [
-      "referral_rewarded",
-      "INTEGER DEFAULT 0"
-    ]
+    ["username", "TEXT"],
+    ["balance", "INTEGER DEFAULT 0"],
+    ["energy", "INTEGER DEFAULT 1000"],
+    ["max_energy", "INTEGER DEFAULT 1000"],
+    ["last_energy_update", "TEXT"],
+    ["created_at", "TEXT"],
+    ["last_daily_bonus", "TEXT"],
+    ["daily_streak", "INTEGER DEFAULT 0"],
+    ["referral_code", "TEXT"],
+    ["referred_by", "TEXT"],
+    ["wallet_address", "TEXT"],
+    ["tap_power", "INTEGER DEFAULT 1"],
+    ["tap_boost_level", "INTEGER DEFAULT 1"],
+    ["energy_boost_level", "INTEGER DEFAULT 1"],
+    ["recharge_multiplier", "INTEGER DEFAULT 1"],
+    ["recharge_level", "INTEGER DEFAULT 1"],
+    ["referral_rewarded", "INTEGER DEFAULT 0"]
 
   ];
 
+
   for (
     const [column, definition]
-    of columns
+    of userColumns
   ) {
 
     await ensureColumn(
@@ -1964,6 +1354,10 @@ async function initDB() {
 
       payout_tx_hash TEXT,
 
+      payout_query_id TEXT,
+
+      payout_submitted_at TEXT,
+
       created_at TEXT,
 
       verified_at TEXT,
@@ -1975,52 +1369,63 @@ async function initDB() {
   `);
 
 
-  await db.execute(`
+  const withdrawalColumns = [
 
+    ["payout_tx_hash", "TEXT"],
+    ["payout_query_id", "TEXT"],
+    ["payout_submitted_at", "TEXT"]
+
+  ];
+
+
+  for (
+    const [column, definition]
+    of withdrawalColumns
+  ) {
+
+    await ensureColumn(
+      "withdrawals",
+      column,
+      definition
+    );
+
+  }
+
+
+  await db.execute(`
     UPDATE users
     SET tap_power = 1
     WHERE tap_power IS NULL
-
   `);
 
   await db.execute(`
-
     UPDATE users
     SET tap_boost_level = 1
     WHERE tap_boost_level IS NULL
-
   `);
 
   await db.execute(`
-
     UPDATE users
     SET energy_boost_level = 1
     WHERE energy_boost_level IS NULL
-
   `);
 
   await db.execute(`
-
     UPDATE users
     SET recharge_multiplier = 1
     WHERE recharge_multiplier IS NULL
-
   `);
 
   await db.execute(`
-
     UPDATE users
     SET recharge_level = 1
     WHERE recharge_level IS NULL
-
   `);
 
   await db.execute(`
-
     UPDATE users
     SET referral_rewarded = 0
     WHERE referral_rewarded IS NULL
-
   `);
 
 
@@ -2056,7 +1461,6 @@ async function initDB() {
         args: [
           code
         ]
-
       });
 
 
@@ -2075,14 +1479,12 @@ async function initDB() {
             FROM users
             WHERE referral_code = ?
             LIMIT 1
-          `,
+            `,
 
           args: [
             code
           ]
-
         });
-
     }
 
 
@@ -2095,24 +1497,16 @@ async function initDB() {
       `,
 
       args: [
-
         code,
-
-        String(
-          row.telegram_id
-        )
-
+        String(row.telegram_id)
       ]
-
     });
-
   }
 
 
   console.log(
     "SINAPS database migration completed successfully."
   );
-
 }
 
 
@@ -2129,20 +1523,15 @@ async function telegramApi(
     await fetch(
       `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
       {
-
-        method:
-          "POST",
+        method: "POST",
 
         headers: {
-
           "Content-Type":
             "application/json"
-
         },
 
         body:
           JSON.stringify(body)
-
       }
     );
 
@@ -2162,11 +1551,9 @@ async function telegramApi(
       data.description ||
       `Telegram ${method} failed`
     );
-
   }
 
   return data.result;
-
 }
 
 
@@ -2179,13 +1566,11 @@ async function isTelegramMember(
     await telegramApi(
       "getChatMember",
       {
-
         chat_id:
           chat,
 
         user_id:
           telegramId
-
       }
     );
 
@@ -2208,295 +1593,6 @@ async function isTelegramMember(
     )
 
   );
-
-}
-
-
-// ============================================================
-// TELEGRAM /START
-// ============================================================
-
-app.post(
-  "/telegram/webhook",
-  async (req, res) => {
-
-    res.sendStatus(200);
-
-    try {
-
-      const update =
-        req.body;
-
-      const message =
-        update?.message;
-
-      if (
-        !message?.chat?.id
-      ) {
-        return;
-      }
-
-      if (
-        message.chat.type !==
-        "private"
-      ) {
-        return;
-      }
-
-      const text =
-        String(
-          message.text || ""
-        );
-
-      if (
-        !/^\/start(?:@\w+)?(?:\s+.*)?$/i
-          .test(text)
-      ) {
-        return;
-      }
-
-      const chatId =
-        message.chat.id;
-
-      const photoUrl =
-        "https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true";
-
-      const miniAppUrl =
-        "https://sadeghi1315.github.io/sinaps-tap-to-earn/";
-
-
-      await telegramApi(
-        "sendPhoto",
-        {
-
-          chat_id:
-            chatId,
-
-          photo:
-            photoUrl,
-
-          caption:
-`🚀 Welcome to SINAPS
-
-Tap • Earn • Grow
-
-Start earning SNP and build your SINAPS balance.
-
-🎁 Daily Rewards
-⚡ Boosts
-👥 Referral Rewards
-💎 TON Wallet
-
-Your SINAPS journey starts here.`,
-
-          reply_markup: {
-
-            inline_keyboard: [
-
-              [
-
-                {
-
-                  text:
-                    "🚀 START SINAPS",
-
-                  web_app: {
-
-                    url:
-                      miniAppUrl
-
-                  }
-
-                }
-
-              ]
-
-            ]
-
-          }
-
-        }
-      );
-
-    } catch (error) {
-
-      console.error(
-        "Telegram /start error:",
-        error
-      );
-
-    }
-
-  }
-);
-
-
-// ============================================================
-// SNP HOLDER CHECK
-// ============================================================
-
-async function checkSnpBalance(wallet) {
-
-  if (!wallet) {
-    return false;
-  }
-
-  try {
-
-    const headers =
-      TONCENTER_API_KEY
-        ? {
-            "X-API-Key": TONCENTER_API_KEY
-          }
-        : {};
-
-    // Normalize the user's TON address
-    const ownerAddress =
-      Address.parse(
-        String(wallet).trim()
-      ).toString();
-
-    const jettonMasterAddress =
-      Address.parse(
-        SNP_CONTRACT
-      ).toString();
-
-    // IMPORTANT:
-    // owner_address = user's TON wallet
-    // jetton_address = SNP master contract
-    const url =
-      `${TONCENTER}/jetton/wallets` +
-      `?owner_address=${encodeURIComponent(ownerAddress)}` +
-      `&jetton_address=${encodeURIComponent(jettonMasterAddress)}` +
-      `&limit=10`;
-
-    console.log("=================================");
-    console.log("SNP HOLDER CHECK");
-    console.log("Owner wallet:", ownerAddress);
-    console.log("SNP contract:", jettonMasterAddress);
-    console.log("URL:", url);
-    console.log("=================================");
-
-    const response =
-      await fetch(
-        url,
-        {
-          method: "GET",
-          headers
-        }
-      );
-
-    if (!response.ok) {
-
-      const errorText =
-        await response.text().catch(
-          () => ""
-        );
-
-      console.error(
-        "TON Center holder check:",
-        response.status,
-        errorText
-      );
-
-      throw new Error(
-        `Unable to verify SNP balance: ${response.status}`
-      );
-
-    }
-
-    const data =
-      await response.json();
-
-    console.log(
-      "TON Center SNP response:",
-      JSON.stringify(data)
-    );
-
-    const wallets =
-      Array.isArray(
-        data?.jetton_wallets
-      )
-        ? data.jetton_wallets
-        : [];
-
-    if (!wallets.length) {
-
-      console.log(
-        "No SNP Jetton Wallet found for this owner."
-      );
-
-      return false;
-
-    }
-
-    // There should normally be one wallet for this
-    // owner + SNP master combination.
-    const row =
-      wallets.find(
-        item =>
-          String(
-            item?.jetton || ""
-          ).toLowerCase() ===
-          String(
-            SNP_CONTRACT
-          ).toLowerCase()
-      ) ||
-      wallets[0];
-
-    const rawBalance =
-      BigInt(
-        String(
-          row?.balance || "0"
-        )
-      );
-
-    const requiredRaw =
-      BigInt(
-        HOLDER_MIN_SNP
-      ) *
-      1000000000n;
-
-    console.log(
-      "SNP raw balance:",
-      rawBalance.toString()
-    );
-
-    console.log(
-      "Required raw balance:",
-      requiredRaw.toString()
-    );
-
-    const balanceSnp =
-      Number(rawBalance) /
-      1000000000;
-
-    console.log(
-      "SNP balance:",
-      balanceSnp
-    );
-
-    const holder =
-      rawBalance >= requiredRaw;
-
-    console.log(
-      "Holder 50,000 SNP:",
-      holder
-    );
-
-    return holder;
-
-  } catch (error) {
-
-    console.error(
-      "checkSnpBalance error:",
-      error
-    );
-
-    throw error;
-
-  }
-
 }
 
 
@@ -2517,7 +1613,7 @@ app.get(
         "online",
 
       version:
-        "4.2.0"
+        "5.0.0"
 
     });
 
@@ -2546,7 +1642,7 @@ app.post(
       }
 
       const telegramId =
-        verified.id;
+        String(verified.id);
 
       const username =
         verified.username ||
@@ -2579,6 +1675,7 @@ app.post(
                 SELECT telegram_id
                 FROM users
                 WHERE referral_code = ?
+                LIMIT 1
               `,
 
               args: [
@@ -2623,7 +1720,7 @@ app.post(
             String(
               ref.rows[0].telegram_id
             ) !==
-            String(telegramId)
+            telegramId
           ) {
 
             referredBy =
@@ -2684,19 +1781,13 @@ app.post(
           args: [
 
             telegramId,
-
             username,
-
             now(),
-
             now(),
-
             referralCode,
-
             referredBy
 
           ]
-
         });
 
 
@@ -2716,11 +1807,8 @@ app.post(
           `,
 
           args: [
-
             username,
-
             telegramId
-
           ]
 
         });
@@ -2744,7 +1832,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -2758,9 +1845,7 @@ app.post(
           "User load failed"
 
       });
-
     }
-
   }
 );
 
@@ -2797,12 +1882,9 @@ app.post(
 
         return res.status(404)
           .json({
-
             error:
               "User not found"
-
           });
-
       }
 
       const count =
@@ -2845,7 +1927,6 @@ app.post(
               publicUser(user)
 
           });
-
       }
 
       const reward =
@@ -2866,37 +1947,30 @@ app.post(
           `,
 
           args: [
-
             reward,
-
             usable,
-
             now(),
-
             telegramId,
-
             usable
-
           ]
-
         });
+
 
       if (!result.rowsAffected) {
 
         return res.status(409)
           .json({
-
             error:
               "Tap conflict. Try again."
-
           });
-
       }
+
 
       const updated =
         await getUser(
           telegramId
         );
+
 
       res.json({
 
@@ -2913,7 +1987,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -2922,14 +1995,10 @@ app.post(
       );
 
       res.status(500).json({
-
         error:
           "Tap failed"
-
       });
-
     }
-
   }
 );
 
@@ -2969,7 +2038,6 @@ function getBoostLevel(
     user.recharge_level ||
     1
   );
-
 }
 
 
@@ -3002,12 +2070,9 @@ app.get(
 
         return res.status(404)
           .json({
-
             error:
               "User not found"
-
           });
-
       }
 
       const boosts =
@@ -3042,23 +2107,20 @@ app.get(
               next:
                 next
                   ? {
-
                       ...next,
 
                       icon:
                         type === "tap"
                           ? "⚡"
                           : type === "energy"
-                          ? "🔋"
-                          : "🚀"
-
+                            ? "🔋"
+                            : "🚀"
                     }
                   : null
-
             };
-
           }
         );
+
 
       res.json({
 
@@ -3074,7 +2136,6 @@ app.get(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -3083,14 +2144,10 @@ app.get(
       );
 
       res.status(500).json({
-
         error:
           "Failed to load boosts"
-
       });
-
     }
-
   }
 );
 
@@ -3127,12 +2184,9 @@ app.post(
 
         return res.status(404)
           .json({
-
             error:
               "User not found"
-
           });
-
       }
 
       const type =
@@ -3146,12 +2200,9 @@ app.post(
 
         return res.status(400)
           .json({
-
             error:
               "Invalid boost type"
-
           });
-
       }
 
       const current =
@@ -3171,12 +2222,9 @@ app.post(
 
         return res.status(400)
           .json({
-
             error:
               "Maximum level reached"
-
           });
-
       }
 
       const deducted =
@@ -3190,16 +2238,12 @@ app.post(
           `,
 
           args: [
-
             next.price,
-
             telegramId,
-
             next.price
-
           ]
-
         });
+
 
       if (
         !deducted.rowsAffected
@@ -3207,13 +2251,11 @@ app.post(
 
         return res.status(400)
           .json({
-
             error:
               `Not enough SNP. Need ${next.price} SNP.`
-
           });
-
       }
+
 
       if (
         type === "tap"
@@ -3230,18 +2272,14 @@ app.post(
           `,
 
           args: [
-
             next.level,
-
             next.level,
-
             telegramId
-
           ]
-
         });
 
       }
+
 
       if (
         type === "energy"
@@ -3286,20 +2324,14 @@ app.post(
           `,
 
           args: [
-
             newMax,
-
             newEnergy,
-
             next.level,
-
             telegramId
-
           ]
-
         });
-
       }
+
 
       if (
         type === "recharge"
@@ -3316,18 +2348,13 @@ app.post(
           `,
 
           args: [
-
             next.level,
-
             next.level,
-
             telegramId
-
           ]
-
         });
-
       }
+
 
       await db.execute({
 
@@ -3345,41 +2372,30 @@ app.post(
         `,
 
         args: [
-
           telegramId,
-
           `${type}${next.level}`,
-
           type,
-
           next.level,
-
           next.price,
-
           now()
-
         ]
-
       });
 
+
       await addTransaction(
-
         telegramId,
-
         "BOOST",
-
         -next.price,
-
         "Completed",
-
         `Purchased ${next.name}`
-
       );
+
 
       const updated =
         await getUser(
           telegramId
         );
+
 
       res.json({
 
@@ -3394,7 +2410,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -3403,14 +2418,10 @@ app.post(
       );
 
       res.status(500).json({
-
         error:
           "Boost purchase failed"
-
       });
-
     }
-
   }
 );
 
@@ -3445,8 +2456,7 @@ function getDailyStatus(
   const claimedToday =
     last === today;
 
-  let nextDay =
-    1;
+  let nextDay = 1;
 
 
   if (
@@ -3478,52 +2488,19 @@ function getDailyStatus(
           streak + 1
         )
       );
-
   }
 
 
-  if (
-    nextDay > 30
-  ) {
-    nextDay = 1;
-  }
-
-
-  let claimedThrough =
-    0;
-
-
-  if (
+  const claimedThrough =
     claimedToday
-  ) {
-
-    claimedThrough =
-      Math.min(
-        30,
-        Math.max(
-          0,
-          streak
+      ? Math.min(
+          30,
+          Math.max(
+            0,
+            streak
+          )
         )
-      );
-
-  } else if (
-    last &&
-    dayDifference(
-      last,
-      today
-    ) === 1
-  ) {
-
-    claimedThrough =
-      Math.min(
-        30,
-        Math.max(
-          0,
-          streak
-        )
-      );
-
-  }
+      : 0;
 
 
   const claimedDays =
@@ -3595,7 +2572,6 @@ function getDailyStatus(
     claimedDays
 
   };
-
 }
 
 
@@ -3624,12 +2600,9 @@ app.get(
 
         return res.status(404)
           .json({
-
             error:
               "User not found"
-
           });
-
       }
 
       const daily =
@@ -3638,16 +2611,10 @@ app.get(
         );
 
       res.json({
-
-        ok:
-          true,
-
+        ok: true,
         daily,
-
         ...daily
-
       });
-
 
     } catch (error) {
 
@@ -3657,14 +2624,10 @@ app.get(
       );
 
       res.status(500).json({
-
         error:
           "Daily status failed"
-
       });
-
     }
-
   }
 );
 
@@ -3694,12 +2657,9 @@ app.get(
 
         return res.status(404)
           .json({
-
             error:
               "User not found"
-
           });
-
       }
 
       const daily =
@@ -3708,14 +2668,9 @@ app.get(
         );
 
       res.json({
-
-        ok:
-          true,
-
+        ok: true,
         ...daily
-
       });
-
 
     } catch (error) {
 
@@ -3725,14 +2680,10 @@ app.get(
       );
 
       res.status(500).json({
-
         error:
           "Daily status failed"
-
       });
-
     }
-
   }
 );
 
@@ -3765,12 +2716,9 @@ app.post(
 
         return res.status(404)
           .json({
-
             error:
               "User not found"
-
           });
-
       }
 
       const today =
@@ -3796,8 +2744,7 @@ app.post(
         return res.status(400)
           .json({
 
-            ok:
-              false,
+            ok: false,
 
             error:
               "Daily reward already claimed",
@@ -3808,36 +2755,19 @@ app.post(
             claimedToday:
               true,
 
-            today_claimed:
-              true,
-
-            todayClaimed:
-              true,
-
-            is_claimed:
-              true,
-
-            isClaimed:
-              true,
-
             can_claim:
               false,
 
             canClaim:
               false,
 
-            last_claim_date:
-              last,
-
             daily
 
           });
-
       }
 
 
-      let day =
-        1;
+      let day = 1;
 
       if (
         last &&
@@ -3852,15 +2782,13 @@ app.post(
             user.daily_streak ||
             0
           ) + 1;
-
       }
 
 
-      if (
-        day > 30
-      ) {
+      if (day > 30) {
         day = 1;
       }
+
 
       const reward =
         day * 10;
@@ -3889,52 +2817,27 @@ app.post(
           `,
 
           args: [
-
             reward,
-
             day,
-
             today,
-
             telegramId,
-
             today
-
           ]
-
         });
 
 
       if (
         Number(
-          updated.rowsAffected ||
-          0
+          updated.rowsAffected || 0
         ) !== 1
       ) {
 
         return res.status(409)
           .json({
-
-            ok:
-              false,
-
+            ok: false,
             error:
-              "Daily reward already claimed",
-
-            claimed_today:
-              true,
-
-            claimedToday:
-              true,
-
-            can_claim:
-              false,
-
-            canClaim:
-              false
-
+              "Daily reward already claimed"
           });
-
       }
 
 
@@ -3952,43 +2855,27 @@ app.post(
         `,
 
         args: [
-
           telegramId,
-
           day,
-
           reward,
-
           now()
-
         ]
-
       });
 
 
       await addTransaction(
-
         telegramId,
-
         "DAILY",
-
         reward,
-
         "Completed",
-
         `Day ${day}`
-
       );
 
 
       await rewardReferralOwner(
-
         telegramId,
-
         reward,
-
         "DAILY"
-
       );
 
 
@@ -4005,8 +2892,7 @@ app.post(
 
       res.json({
 
-        ok:
-          true,
+        ok: true,
 
         day,
 
@@ -4021,18 +2907,6 @@ app.post(
           true,
 
         claimedToday:
-          true,
-
-        today_claimed:
-          true,
-
-        todayClaimed:
-          true,
-
-        is_claimed:
-          true,
-
-        isClaimed:
           true,
 
         can_claim:
@@ -4060,7 +2934,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -4069,14 +2942,10 @@ app.post(
       );
 
       res.status(500).json({
-
         error:
           "Daily claim failed"
-
       });
-
     }
-
   }
 );
 
@@ -4107,20 +2976,24 @@ app.post(
           ""
         ).trim();
 
-      if (
-        wallet.length < 20 ||
-        wallet.length > 150
-      ) {
+      let normalized;
+
+      try {
+
+        normalized =
+          Address.parse(
+            wallet
+          ).toString();
+
+      } catch {
 
         return res.status(400)
           .json({
-
             error:
               "Invalid TON wallet"
-
           });
-
       }
+
 
       await db.execute({
 
@@ -4131,24 +3004,23 @@ app.post(
         `,
 
         args: [
-
-          wallet,
-
+          normalized,
           verified.id
-
         ]
-
       });
+
 
       const referralReward =
         await qualifyReferral(
           verified.id
         );
 
+
       const user =
         await getUser(
           verified.id
         );
+
 
       res.json({
 
@@ -4156,7 +3028,7 @@ app.post(
           true,
 
         wallet_address:
-          wallet,
+          normalized,
 
         referral_reward:
           referralReward,
@@ -4166,7 +3038,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -4175,14 +3046,10 @@ app.post(
       );
 
       res.status(500).json({
-
         error:
           "Wallet save failed"
-
       });
-
     }
-
   }
 );
 
@@ -4214,8 +3081,8 @@ app.post(
         args: [
           verified.id
         ]
-
       });
+
 
       res.json({
 
@@ -4227,7 +3094,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -4236,14 +3102,10 @@ app.post(
       );
 
       res.status(500).json({
-
         error:
           "Wallet disconnect failed"
-
       });
-
     }
-
   }
 );
 
@@ -4280,7 +3142,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -4289,20 +3150,140 @@ app.post(
       );
 
       res.status(500).json({
-
         error:
           "Wallet lookup failed"
-
       });
-
     }
-
   }
 );
 
 
 // ============================================================
-// TASKS
+// TASK STATUS
+// ============================================================
+
+async function getTaskStatus(
+  telegramId
+) {
+
+  const claimedResult =
+    await db.execute({
+
+      sql: `
+        SELECT task_id
+        FROM task_claims
+        WHERE telegram_id = ?
+          AND status = 'Completed'
+      `,
+
+      args: [
+        String(telegramId)
+      ]
+    });
+
+
+  const claimed =
+    new Set(
+      claimedResult.rows.map(
+        row =>
+          String(row.task_id)
+      )
+    );
+
+
+  const referralCount =
+    await getReferralCount(
+      telegramId
+    );
+
+
+  const user =
+    await getUser(
+      telegramId
+    );
+
+
+  return TASKS.map(
+    task => {
+
+      let completed =
+        claimed.has(
+          task.id
+        );
+
+
+      // --------------------------------------------------------
+      // REFERRAL TASKS MUST USE REAL REFERRAL COUNT
+      // --------------------------------------------------------
+
+      if (
+        task.type ===
+        "referral"
+      ) {
+
+        const required =
+          Number(
+            task.required || 0
+          );
+
+        completed =
+          completed &&
+          referralCount >=
+          required;
+
+        /*
+         * Extra protection:
+         * Even if an old/bad database record says
+         * this task was claimed, it cannot show DONE
+         * until the actual number of referrals is enough.
+         */
+      }
+
+
+      // --------------------------------------------------------
+      // WALLET TASK
+      // --------------------------------------------------------
+
+      if (
+        task.type ===
+        "wallet"
+      ) {
+
+        completed =
+          completed &&
+          Boolean(
+            user?.wallet_address
+          );
+      }
+
+
+      return {
+
+        ...task,
+
+        completed,
+
+        referral_count:
+          task.type === "referral"
+            ? referralCount
+            : undefined,
+
+        action:
+          task.type === "wallet"
+            ? "CONNECT"
+            : task.type === "holder"
+              ? "VERIFY"
+              : "VERIFY"
+
+      };
+
+    }
+  );
+}
+
+
+// ============================================================
+// GET TASKS
 // ============================================================
 
 app.get(
@@ -4321,58 +3302,21 @@ app.get(
         return;
       }
 
-      const result =
-        await db.execute({
 
-          sql: `
-            SELECT task_id
-            FROM task_claims
-            WHERE telegram_id = ?
-          `,
-
-          args: [
-            verified.id
-          ]
-
-        });
-
-      const claimed =
-        new Set(
-          result.rows.map(
-            x =>
-              String(
-                x.task_id
-              )
-          )
+      const tasks =
+        await getTaskStatus(
+          verified.id
         );
+
 
       res.json({
 
         ok:
           true,
 
-        tasks:
-          TASKS.map(
-            task => ({
-
-              ...task,
-
-              completed:
-                claimed.has(
-                  task.id
-                ),
-
-              action:
-                task.type ===
-                "holder"
-                  ? "VERIFY"
-                  : "JOIN & VERIFY"
-
-            })
-          )
+        tasks
 
       });
-
 
     } catch (error) {
 
@@ -4384,15 +3328,167 @@ app.get(
       res.status(500).json({
 
         error:
-          "Tasks failed"
+          "Tasks could not be loaded",
+
+        details:
+          error.message
 
       });
-
     }
-
   }
 );
 
+
+// ============================================================
+// SNP HOLDER CHECK
+// ============================================================
+
+async function checkSnpBalance(
+  wallet
+) {
+
+  if (!wallet) {
+    return false;
+  }
+
+  try {
+
+    const headers =
+      TONCENTER_API_KEY
+        ? {
+            "X-API-Key":
+              TONCENTER_API_KEY
+          }
+        : {};
+
+
+    const ownerAddress =
+      Address.parse(
+        String(wallet).trim()
+      ).toString();
+
+
+    const jettonMasterAddress =
+      Address.parse(
+        SNP_CONTRACT
+      ).toString();
+
+
+    const url =
+      `${TONCENTER}/jetton/wallets` +
+      `?owner_address=${encodeURIComponent(ownerAddress)}` +
+      `&jetton_address=${encodeURIComponent(jettonMasterAddress)}` +
+      `&limit=10`;
+
+
+    const response =
+      await fetch(
+        url,
+        {
+          method:
+            "GET",
+
+          headers
+        }
+      );
+
+
+    if (!response.ok) {
+
+      const errorText =
+        await response.text()
+          .catch(
+            () => ""
+          );
+
+      throw new Error(
+        `Unable to verify SNP balance: ${response.status} ${errorText}`
+      );
+    }
+
+
+    const data =
+      await response.json();
+
+
+    const wallets =
+      Array.isArray(
+        data?.jetton_wallets
+      )
+        ? data.jetton_wallets
+        : [];
+
+
+    if (!wallets.length) {
+      return false;
+    }
+
+
+    const targetMaster =
+      normalizeAddress(
+        SNP_CONTRACT
+      );
+
+
+    const row =
+      wallets.find(
+        item => {
+
+          try {
+
+            return normalizeAddress(
+              String(
+                item?.jetton ||
+                item?.jetton_master ||
+                ""
+              )
+            ) === targetMaster;
+
+          } catch {
+
+            return false;
+          }
+        }
+      ) ||
+      wallets[0];
+
+
+    const rawBalance =
+      BigInt(
+        String(
+          row?.balance ||
+          "0"
+        )
+      );
+
+
+    const requiredRaw =
+      BigInt(
+        HOLDER_MIN_SNP
+      ) *
+      1000000000n;
+
+
+    return (
+      rawBalance >=
+      requiredRaw
+    );
+
+  } catch (error) {
+
+    console.error(
+      "checkSnpBalance:",
+      error
+    );
+
+    throw error;
+  }
+}
+
+
+// ============================================================
+// TASK CLAIM
+// ============================================================
 
 app.post(
   "/api/tasks/claim",
@@ -4410,34 +3506,68 @@ app.post(
         return;
       }
 
+
       const telegramId =
-        verified.id;
+        String(verified.id);
+
 
       const taskId =
         String(
           req.body.task_id ||
           ""
-        );
+        ).trim();
+
+
+      const requestedWallet =
+        String(
+          req.body.wallet_address ||
+          ""
+        ).trim();
+
 
       const task =
         TASKS.find(
-          t =>
-            t.id === taskId
+          item =>
+            String(item.id) ===
+            taskId
         );
+
 
       if (!task) {
 
         return res.status(400)
           .json({
-
             error:
-              "Task not found"
-
+              "Unknown task"
           });
-
       }
 
-      const existing =
+
+      // --------------------------------------------------------
+      // USER
+      // --------------------------------------------------------
+
+      const user =
+        await getUser(
+          telegramId
+        );
+
+
+      if (!user) {
+
+        return res.status(404)
+          .json({
+            error:
+              "User not found"
+          });
+      }
+
+
+      // --------------------------------------------------------
+      // ALREADY CLAIMED
+      // --------------------------------------------------------
+
+      const already =
         await db.execute({
 
           sql: `
@@ -4445,94 +3575,102 @@ app.post(
             FROM task_claims
             WHERE telegram_id = ?
               AND task_id = ?
+            LIMIT 1
           `,
 
           args: [
-
             telegramId,
-
             taskId
-
           ]
-
         });
 
+
       if (
-        existing.rows.length
+        already.rows.length
       ) {
 
         return res.status(400)
           .json({
 
             error:
-              "Task already completed"
+              "Task already completed",
+
+            already_completed:
+              true
 
           });
-
       }
 
 
+      // --------------------------------------------------------
+      // REFERRAL TASK
+      // --------------------------------------------------------
+
       if (
         task.type ===
-        "telegram"
+        "referral"
       ) {
 
-        try {
-
-          const member =
-            await isTelegramMember(
-              task.chat,
-              telegramId
-            );
-
-          if (!member) {
-
-            return res.status(400)
-              .json({
-
-                error:
-                  "Join the channel/group first, then verify."
-
-              });
-
-          }
-
-        } catch (error) {
-
-          console.error(
-            "membership check",
-            error
+        const required =
+          Number(
+            task.required || 0
           );
+
+
+        const referralCount =
+          await getReferralCount(
+            telegramId
+          );
+
+
+        console.log(
+          "REFERRAL TASK CHECK",
+          {
+            telegramId,
+            taskId,
+            required,
+            referralCount
+          }
+        );
+
+
+        if (
+          referralCount <
+          required
+        ) {
 
           return res.status(400)
             .json({
 
               error:
-                "Telegram could not verify membership. Make the bot an admin in the channel/group."
+                `You need ${required} referrals. You currently have ${referralCount}.`,
+
+              required,
+
+              referral_count:
+                referralCount
 
             });
-
         }
-
       }
 
 
+      // --------------------------------------------------------
+      // WALLET TASK
+      // --------------------------------------------------------
+
       if (
         task.type ===
-        "holder"
+        "wallet"
       ) {
 
-        const user =
-          await getUser(
-            telegramId
-          );
-
         const wallet =
+          requestedWallet ||
           String(
-            req.body.wallet_address ||
-            user?.wallet_address ||
+            user.wallet_address ||
             ""
           ).trim();
+
 
         if (!wallet) {
 
@@ -4543,13 +3681,81 @@ app.post(
                 "Connect your TON wallet first."
 
             });
+        }
+
+
+        try {
+
+          Address.parse(
+            wallet
+          );
+
+        } catch {
+
+          return res.status(400)
+            .json({
+              error:
+                "Invalid TON wallet"
+            });
+        }
+
+
+        if (
+          !user.wallet_address
+        ) {
+
+          await db.execute({
+
+            sql: `
+              UPDATE users
+              SET wallet_address = ?
+              WHERE telegram_id = ?
+            `,
+
+            args: [
+              wallet,
+              telegramId
+            ]
+          });
 
         }
+      }
+
+
+      // --------------------------------------------------------
+      // HOLDER TASK
+      // --------------------------------------------------------
+
+      if (
+        task.type ===
+        "holder"
+      ) {
+
+        const wallet =
+          requestedWallet ||
+          String(
+            user.wallet_address ||
+            ""
+          ).trim();
+
+
+        if (!wallet) {
+
+          return res.status(400)
+            .json({
+
+              error:
+                "Connect your TON wallet first."
+
+            });
+        }
+
 
         const holder =
           await checkSnpBalance(
             wallet
           );
+
 
         if (!holder) {
 
@@ -4560,48 +3766,145 @@ app.post(
                 `You need at least ${HOLDER_MIN_SNP.toLocaleString("en-US")} SNP in this wallet.`
 
             });
-
         }
-
       }
 
 
-      await db.execute({
+      // --------------------------------------------------------
+      // TELEGRAM TASK
+      // --------------------------------------------------------
 
-        sql: `
-          INSERT INTO task_claims
-          (
-            telegram_id,
-            task_id,
-            reward,
-            status,
-            created_at
+      if (
+        task.type ===
+        "telegram"
+      ) {
+
+        if (!task.chat) {
+
+          return res.status(500)
+            .json({
+              error:
+                "Telegram task configuration is missing"
+            });
+        }
+
+
+        try {
+
+          const member =
+            await isTelegramMember(
+              task.chat,
+              telegramId
+            );
+
+
+          if (!member) {
+
+            return res.status(400)
+              .json({
+
+                error:
+                  "Join the Telegram channel/group first, then verify."
+
+              });
+          }
+
+        } catch (error) {
+
+          console.error(
+            "Telegram membership check:",
+            error
+          );
+
+          return res.status(400)
+            .json({
+
+              error:
+                "Telegram could not verify membership. Make sure the bot is an administrator of the channel/group."
+
+            });
+        }
+      }
+
+
+      // --------------------------------------------------------
+      // EXTERNAL X TASKS
+      // --------------------------------------------------------
+
+      if (
+        task.type ===
+        "external"
+      ) {
+
+        return res.status(400)
+          .json({
+
+            error:
+              "X verification requires X API access and cannot be automatically verified."
+
+          });
+      }
+
+
+      // --------------------------------------------------------
+      // CLAIM
+      // --------------------------------------------------------
+
+      try {
+
+        await db.execute({
+
+          sql: `
+            INSERT INTO task_claims
+            (
+              telegram_id,
+              task_id,
+              reward,
+              status,
+              created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+          `,
+
+          args: [
+            telegramId,
+            task.id,
+            Number(task.reward || 0),
+            "Completed",
+            now()
+          ]
+        });
+
+      } catch (insertError) {
+
+        if (
+          String(
+            insertError.message || ""
           )
-          VALUES (?, ?, ?, ?, ?)
-        `,
+            .toLowerCase()
+            .includes("unique")
+        ) {
 
-        args: [
+          return res.status(400)
+            .json({
+              error:
+                "Task already completed",
+              already_completed:
+                true
+            });
+        }
 
-          telegramId,
-
-          task.id,
-
-          task.reward,
-
-          "Completed",
-
-          now()
-
-        ]
-
-      });
+        throw insertError;
+      }
 
 
       await rewardUser(
 
         telegramId,
 
-        task.reward,
+        Number(
+          task.reward || 0
+        ),
 
         "TASK",
 
@@ -4610,26 +3913,36 @@ app.post(
       );
 
 
-      const user =
+      const fresh =
         await getUser(
           telegramId
         );
+
 
       res.json({
 
         ok:
           true,
 
+        task_id:
+          task.id,
+
         reward:
-          task.reward,
+          Number(
+            task.reward || 0
+          ),
 
         balance:
           Number(
-            user.balance || 0
+            fresh?.balance || 0
+          ),
+
+        referral_count:
+          await getReferralCount(
+            telegramId
           )
 
       });
-
 
     } catch (error) {
 
@@ -4641,12 +3954,13 @@ app.post(
       res.status(500).json({
 
         error:
-          "Task verification failed"
+          "Task verification failed",
+
+        details:
+          error.message
 
       });
-
     }
-
   }
 );
 
@@ -4671,10 +3985,12 @@ app.get(
         return;
       }
 
+
       const user =
         await getUser(
           verified.id
         );
+
 
       const friends =
         await db.execute({
@@ -4695,8 +4011,8 @@ app.get(
           args: [
             verified.id
           ]
-
         });
+
 
       const earnings =
         await db.execute({
@@ -4716,12 +4032,13 @@ app.get(
           args: [
             verified.id
           ]
-
         });
+
 
       const code =
         user?.referral_code ||
         "";
+
 
       const mapped =
         friends.rows.map(
@@ -4764,6 +4081,7 @@ app.get(
           })
         );
 
+
       res.json({
 
         ok:
@@ -4801,7 +4119,6 @@ app.get(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -4810,14 +4127,10 @@ app.get(
       );
 
       res.status(500).json({
-
         error:
           "Friends failed"
-
       });
-
     }
-
   }
 );
 
@@ -4842,6 +4155,7 @@ app.get(
         return;
       }
 
+
       const result =
         await db.execute({
 
@@ -4856,8 +4170,8 @@ app.get(
           args: [
             verified.id
           ]
-
         });
+
 
       res.json({
 
@@ -4869,7 +4183,6 @@ app.get(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -4878,20 +4191,16 @@ app.get(
       );
 
       res.status(500).json({
-
         error:
           "History failed"
-
       });
-
     }
-
   }
 );
 
 
 // ============================================================
-// W5 TREASURY INITIALIZATION
+// TREASURY INITIALIZATION
 // ============================================================
 
 async function initTreasuryPayout() {
@@ -4901,6 +4210,7 @@ async function initTreasuryPayout() {
   ) {
     return treasuryInitPromise;
   }
+
 
   treasuryInitPromise =
     (async () => {
@@ -4912,14 +4222,15 @@ async function initTreasuryPayout() {
         throw new Error(
           "TREASURY_MNEMONIC is not configured"
         );
-
       }
+
 
       const words =
         TREASURY_MNEMONIC
           .trim()
           .split(/\s+/)
           .filter(Boolean);
+
 
       if (
         words.length < 12
@@ -4928,13 +4239,7 @@ async function initTreasuryPayout() {
         throw new Error(
           "TREASURY_MNEMONIC is invalid"
         );
-
       }
-
-
-      console.log(
-        "Initializing Treasury W5..."
-      );
 
 
       treasuryKeyPair =
@@ -4972,10 +4277,8 @@ async function initTreasuryPayout() {
             treasuryKeyPair.publicKey,
 
           walletId: {
-
             networkGlobalId:
               -239
-
           }
 
         });
@@ -4984,15 +4287,12 @@ async function initTreasuryPayout() {
       const expectedRaw =
         expected.toRawString();
 
+
       const seedRaw =
         treasuryWallet
           .address
           .toRawString();
 
-
-      console.log(
-        "================================="
-      );
 
       console.log(
         "Treasury expected:",
@@ -5013,13 +4313,7 @@ async function initTreasuryPayout() {
         throw new Error(
           "TREASURY_MNEMONIC does not match Treasury W5 address"
         );
-
       }
-
-
-      console.log(
-        "TREASURY WALLET TYPE: W5 / V5R1"
-      );
 
 
       const master =
@@ -5043,13 +4337,9 @@ async function initTreasuryPayout() {
         treasuryJettonWallet.toString()
       );
 
-      console.log(
-        "SNP contract:",
-        SNP_CONTRACT
-      );
 
       console.log(
-        "================================="
+        "Treasury W5 initialized successfully."
       );
 
 
@@ -5068,9 +4358,7 @@ async function initTreasuryPayout() {
       null;
 
     throw error;
-
   }
-
 }
 
 
@@ -5086,17 +4374,20 @@ async function findFeePayment(
     return null;
   }
 
+
   const source =
     String(
       withdrawal.wallet_address ||
       ""
     ).trim();
 
+
   const destination =
     String(
       TREASURY_WALLET ||
       ""
     ).trim();
+
 
   if (
     !source ||
@@ -5135,27 +4426,7 @@ async function findFeePayment(
     120000;
 
 
-  console.log(
-    "Checking TON fee payment..."
-  );
-
-  console.log(
-    "Fee source:",
-    source
-  );
-
-  console.log(
-    "Fee destination:",
-    destination
-  );
-
-  console.log(
-    "Required nanoTON:",
-    FEE_NANO
-  );
-
-
-  let url =
+  const url =
     `${TONCENTER}/transactions` +
     `?account=${encodeURIComponent(treasury)}` +
     `&limit=100`;
@@ -5175,7 +4446,6 @@ async function findFeePayment(
     throw new Error(
       `TON Center transactions lookup failed: ${response.status}`
     );
-
   }
 
 
@@ -5200,6 +4470,12 @@ async function findFeePayment(
   ) {
     return null;
   }
+
+
+  const sourceRaw =
+    Address.parse(
+      source
+    ).toRawString();
 
 
   for (
@@ -5262,86 +4538,29 @@ async function findFeePayment(
         "";
 
 
-      if (
-        msgSource
-      ) {
-
-        try {
-
-          const srcRaw =
-            Address.parse(
-              String(
-                msgSource
-              )
-            ).toRawString();
-
-          const sourceRaw =
-            Address.parse(
-              source
-            ).toRawString();
-
-          if (
-            srcRaw !==
-            sourceRaw
-          ) {
-            continue;
-          }
-
-        } catch {
-
-          if (
-            String(
-              msgSource
-            ) !==
-            source
-          ) {
-            continue;
-          }
-
-        }
-
-      } else {
-
+      if (!msgSource) {
         continue;
-
       }
 
 
-      const destinationFromMsg =
-        inMsg.destination ||
-        inMsg.dest ||
-        inMsg.dst ||
-        "";
+      try {
+
+        const msgSourceRaw =
+          Address.parse(
+            String(msgSource)
+          ).toRawString();
 
 
-      if (
-        destinationFromMsg
-      ) {
-
-        try {
-
-          const dstRaw =
-            Address.parse(
-              String(
-                destinationFromMsg
-              )
-            ).toRawString();
-
-          if (
-            dstRaw !==
-            treasury
-          ) {
-            continue;
-          }
-
-        } catch {
-
-          // If destination is unavailable
-          // in this response format,
-          // the transaction is already
-          // queried directly from Treasury.
-
+        if (
+          msgSourceRaw !==
+          sourceRaw
+        ) {
+          continue;
         }
+
+      } catch {
+
+        continue;
 
       }
 
@@ -5353,17 +4572,11 @@ async function findFeePayment(
         tx.id ||
         "";
 
+
       const msgHash =
         inMsg.hash ||
         inMsg.message_hash ||
         "";
-
-
-      console.log(
-        "TON fee payment FOUND:",
-        txHash ||
-        msgHash
-      );
 
 
       return {
@@ -5377,14 +4590,11 @@ async function findFeePayment(
           msgHash ||
           "",
 
-        value:
-          value,
+        value,
 
-        source:
-          source,
+        source,
 
-        destination:
-          destination,
+        destination,
 
         transaction:
           tx
@@ -5397,19 +4607,11 @@ async function findFeePayment(
         "Fee transaction parse error:",
         error.message
       );
-
     }
-
   }
 
 
-  console.log(
-    "TON fee payment not found yet."
-  );
-
-
   return null;
-
 }
 
 
@@ -5424,28 +4626,6 @@ async function sendSnpPayout(
 ) {
 
   await initTreasuryPayout();
-
-
-  if (
-    !treasuryWallet
-  ) {
-
-    throw new Error(
-      "Treasury W5 wallet is not initialized"
-    );
-
-  }
-
-
-  if (
-    !treasuryJettonWallet
-  ) {
-
-    throw new Error(
-      "Treasury SNP Jetton Wallet is not initialized"
-    );
-
-  }
 
 
   const destinationAddress =
@@ -5506,55 +4686,6 @@ async function sendSnpPayout(
       .endCell();
 
 
-  console.log(
-    "================================="
-  );
-
-  console.log(
-    "SNP PAYOUT"
-  );
-
-  console.log(
-    "Withdrawal:",
-    withdrawalId
-  );
-
-  console.log(
-    "Amount:",
-    amount,
-    "SNP"
-  );
-
-  console.log(
-    "Destination:",
-    destinationAddress.toString()
-  );
-
-  console.log(
-    "Treasury:",
-    TREASURY_WALLET
-  );
-
-  console.log(
-    "Jetton wallet:",
-    treasuryJettonWallet.toString()
-  );
-
-  console.log(
-    "Seqno:",
-    seqno
-  );
-
-  console.log(
-    "Query ID:",
-    queryId.toString()
-  );
-
-  console.log(
-    "================================="
-  );
-
-
   const transfer =
     openedWallet.createTransfer({
 
@@ -5599,7 +4730,14 @@ async function sendSnpPayout(
 
 
   console.log(
-    "SNP PAYOUT TRANSACTION SUBMITTED"
+    "SNP PAYOUT SUBMITTED",
+    {
+      withdrawalId,
+      amount,
+      queryId:
+        queryId.toString(),
+      seqno
+    }
   );
 
 
@@ -5607,6 +4745,8 @@ async function sendSnpPayout(
 
     query_id:
       queryId.toString(),
+
+    seqno,
 
     treasury_wallet:
       treasuryWallet.address.toString(),
@@ -5624,7 +4764,243 @@ async function sendSnpPayout(
       withdrawalId
 
   };
+}
 
+
+// ============================================================
+// FIND REAL SNP PAYOUT TRANSACTION HASH
+// ============================================================
+
+async function findPayoutTransaction(
+  queryId,
+  maxAgeMs = 10 * 60 * 1000
+) {
+
+  await initTreasuryPayout();
+
+
+  const targetQueryId =
+    BigInt(
+      String(queryId)
+    );
+
+
+  const transactions =
+    await treasuryTonClient.getTransactions(
+      Address.parse(
+        TREASURY_WALLET
+      ),
+      {
+        limit: 50
+      }
+    );
+
+
+  const nowMs =
+    Date.now();
+
+
+  for (
+    const tx of transactions
+  ) {
+
+    try {
+
+      const txNow =
+        Number(
+          tx.now || 0
+        ) * 1000;
+
+
+      if (
+        txNow &&
+        nowMs - txNow >
+        maxAgeMs
+      ) {
+        continue;
+      }
+
+
+      if (
+        !tx.outMessages
+      ) {
+        continue;
+      }
+
+
+      const messages =
+        tx.outMessages.values();
+
+
+      for (
+        const message of messages
+      ) {
+
+        try {
+
+          if (
+            !message?.info?.dest
+          ) {
+            continue;
+          }
+
+
+          const destination =
+            message.info.dest
+              .toRawString();
+
+
+          if (
+            destination !==
+            treasuryJettonWallet
+              .toRawString()
+          ) {
+            continue;
+          }
+
+
+          const slice =
+            message.body
+              .beginParse();
+
+
+          if (
+            slice.remainingBits <
+            96
+          ) {
+            continue;
+          }
+
+
+          const op =
+            slice.loadUint(32);
+
+
+          const messageQueryId =
+            slice.loadUintBig(64);
+
+
+          if (
+            op !==
+            0x0f8a7ea5
+          ) {
+            continue;
+          }
+
+
+          if (
+            messageQueryId !==
+            targetQueryId
+          ) {
+            continue;
+          }
+
+
+          const hash =
+            tx.hash()
+              .toString("hex");
+
+
+          console.log(
+            "REAL SNP PAYOUT TX FOUND:",
+            hash
+          );
+
+
+          return {
+
+            tx_hash:
+              hash,
+
+            query_id:
+              String(queryId),
+
+            lt:
+              String(
+                tx.lt
+              ),
+
+            now:
+              tx.now
+
+          };
+
+        } catch (messageError) {
+
+          console.error(
+            "Payout message parse:",
+            messageError.message
+          );
+
+        }
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Payout transaction parse:",
+        error.message
+      );
+
+    }
+  }
+
+
+  return null;
+}
+
+
+// ============================================================
+// WAIT FOR REAL PAYOUT HASH
+// ============================================================
+
+async function waitForPayoutTransaction(
+  queryId,
+  timeoutMs = 60000
+) {
+
+  const started =
+    Date.now();
+
+
+  while (
+    Date.now() -
+    started <
+    timeoutMs
+  ) {
+
+    try {
+
+      const found =
+        await findPayoutTransaction(
+          queryId
+        );
+
+
+      if (found) {
+        return found;
+      }
+
+    } catch (error) {
+
+      console.error(
+        "Waiting for payout tx:",
+        error.message
+      );
+    }
+
+
+    await new Promise(
+      resolve =>
+        setTimeout(
+          resolve,
+          3000
+        )
+    );
+  }
+
+
+  return null;
 }
 
 
@@ -5648,14 +5024,17 @@ app.post(
         return;
       }
 
+
       const telegramId =
         verified.id;
+
 
       const amount =
         safeInt(
           req.body.amount,
           0
         );
+
 
       const requestedWallet =
         String(
@@ -5670,12 +5049,9 @@ app.post(
 
         return res.status(400)
           .json({
-
             error:
               "Invalid withdrawal amount"
-
           });
-
       }
 
 
@@ -5689,45 +5065,69 @@ app.post(
 
         return res.status(404)
           .json({
-
             error:
               "User not found"
-
           });
-
       }
 
 
       if (
-        !requestedWallet ||
-        requestedWallet.length < 20
+        !requestedWallet
       ) {
 
         return res.status(400)
           .json({
-
             error:
               "Connect your wallet first"
-
           });
+      }
 
+
+      let normalizedWallet;
+
+      try {
+
+        normalizedWallet =
+          Address.parse(
+            requestedWallet
+          ).toString();
+
+      } catch {
+
+        return res.status(400)
+          .json({
+            error:
+              "Invalid TON wallet"
+          });
       }
 
 
       if (
-        user.wallet_address &&
-        user.wallet_address !==
-          requestedWallet
+        user.wallet_address
       ) {
 
-        return res.status(400)
-          .json({
+        const saved =
+          normalizeAddress(
+            user.wallet_address
+          );
 
-            error:
-              "Wallet does not match your connected wallet"
+        const requested =
+          normalizeAddress(
+            normalizedWallet
+          );
 
-          });
 
+        if (
+          saved !==
+          requested
+        ) {
+
+          return res.status(400)
+            .json({
+              error:
+                "Wallet does not match your connected wallet"
+            });
+        }
       }
 
 
@@ -5749,15 +5149,10 @@ app.post(
           `,
 
           args: [
-
             amount,
-
             telegramId,
-
             amount
-
           ]
-
         });
 
 
@@ -5767,12 +5162,9 @@ app.post(
 
         return res.status(400)
           .json({
-
             error:
               "Not enough SNP"
-
           });
-
       }
 
 
@@ -5803,7 +5195,7 @@ app.post(
 
             telegramId,
 
-            requestedWallet,
+            normalizedWallet,
 
             amount,
 
@@ -5820,7 +5212,6 @@ app.post(
             now()
 
           ]
-
         });
 
 
@@ -5850,17 +5241,12 @@ app.post(
           `,
 
           args: [
-
             amount,
-
             telegramId
-
           ]
-
         });
 
         throw error;
-
       }
 
 
@@ -5894,7 +5280,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -5903,14 +5288,10 @@ app.post(
       );
 
       res.status(500).json({
-
         error:
           "Withdrawal creation failed"
-
       });
-
     }
-
   }
 );
 
@@ -5943,7 +5324,7 @@ app.post(
         );
 
 
-      let current =
+      let result =
         await db.execute({
 
           sql: `
@@ -5955,78 +5336,63 @@ app.post(
           `,
 
           args: [
-
             id,
-
             verified.id
-
           ]
-
         });
 
 
-      let currentWithdrawal =
-        current.rows[0];
+      let withdrawal =
+        result.rows[0];
 
 
-      if (
-        !currentWithdrawal
-      ) {
+      if (!withdrawal) {
 
         return res.status(404)
           .json({
-
             error:
               "Withdrawal not found"
-
           });
-
       }
 
 
-      // --------------------------------------------------------
-      // VERIFY 0.1 TON FEE
-      // --------------------------------------------------------
+      // ========================================================
+      // STEP 1 — VERIFY 0.1 TON
+      // ========================================================
 
       if (
-        currentWithdrawal.status ===
+        withdrawal.status ===
         "payment_pending"
       ) {
 
-        let feePayment =
-          null;
+        let feePayment;
 
 
         try {
 
           feePayment =
             await findFeePayment(
-              currentWithdrawal
+              withdrawal
             );
 
-        } catch (
-          feeLookupError
-        ) {
+        } catch (error) {
 
           console.error(
-            "Fee verification lookup failed",
-            feeLookupError
+            "Fee verification:",
+            error
           );
 
           return res.status(503)
             .json({
 
               error:
-                "Could not verify the TON fee yet. Please try again in a few seconds."
+                "Could not verify the TON fee yet. Please try again."
 
             });
-
         }
 
 
-        if (
-          !feePayment
-        ) {
+        if (!feePayment) {
 
           return res.status(400)
             .json({
@@ -6038,105 +5404,173 @@ app.post(
                 "payment_pending"
 
             });
-
         }
 
 
-        const marked =
+        const feeHash =
+          feePayment.tx_hash ||
+          feePayment.msg_hash ||
+          "";
+
+
+        await db.execute({
+
+          sql: `
+            UPDATE withdrawals
+            SET
+              status = 'fee_submitted',
+              fee_tx_hash = ?,
+              verified_at = ?
+            WHERE withdrawal_id = ?
+              AND telegram_id = ?
+              AND status = 'payment_pending'
+          `,
+
+          args: [
+
+            feeHash,
+
+            now(),
+
+            id,
+
+            verified.id
+
+          ]
+        });
+
+
+        result =
           await db.execute({
 
             sql: `
-              UPDATE withdrawals
-              SET
-                status = 'fee_submitted',
-                fee_tx_hash = ?,
-                verified_at = ?
+              SELECT *
+              FROM withdrawals
               WHERE withdrawal_id = ?
                 AND telegram_id = ?
-                AND status = 'payment_pending'
+              LIMIT 1
             `,
 
             args: [
-
-              feePayment.tx_hash ||
-              feePayment.msg_hash ||
-              "",
-
-              now(),
-
               id,
-
               verified.id
-
             ]
-
           });
 
 
+        withdrawal =
+          result.rows[0];
+      }
+
+
+      // ========================================================
+      // STEP 2 — IF PAYOUT ALREADY SUBMITTED
+      // SEARCH REAL HASH — NEVER RESEND
+      // ========================================================
+
+      if (
+        withdrawal.status ===
+        "payout_submitted"
+      ) {
+
         if (
-          !marked.rowsAffected
+          withdrawal.payout_query_id
         ) {
 
-          current =
+          const realTx =
+            await findPayoutTransaction(
+              withdrawal.payout_query_id
+            );
+
+
+          if (realTx) {
+
             await db.execute({
 
               sql: `
-                SELECT *
-                FROM withdrawals
+                UPDATE withdrawals
+                SET
+                  status = 'paid',
+                  payout_tx_hash = ?,
+                  completed_at = ?
                 WHERE withdrawal_id = ?
                   AND telegram_id = ?
-                LIMIT 1
+                  AND status = 'payout_submitted'
               `,
 
               args: [
+
+                realTx.tx_hash,
+
+                now(),
 
                 id,
 
                 verified.id
 
               ]
-
             });
 
-          currentWithdrawal =
-            current.rows[0];
+          } else {
 
-        } else {
+            return res.json({
 
-          currentWithdrawal = {
+              ok:
+                true,
 
-            ...currentWithdrawal,
+              withdrawal: {
+                ...withdrawal,
+                status:
+                  "payout_submitted"
+              },
 
-            status:
-              "fee_submitted",
+              message:
+                "SNP transaction has been submitted. Waiting for the real blockchain transaction hash."
 
-            fee_tx_hash:
-              feePayment.tx_hash ||
-              feePayment.msg_hash ||
-              ""
-
-          };
-
+            });
+          }
         }
-
       }
 
 
-      // --------------------------------------------------------
-      // SEND SNP
-      // --------------------------------------------------------
+      // ========================================================
+      // REFRESH
+      // ========================================================
+
+      result =
+        await db.execute({
+
+          sql: `
+            SELECT *
+            FROM withdrawals
+            WHERE withdrawal_id = ?
+              AND telegram_id = ?
+            LIMIT 1
+          `,
+
+          args: [
+            id,
+            verified.id
+          ]
+        });
+
+
+      withdrawal =
+        result.rows[0];
+
+
+      // ========================================================
+      // STEP 3 — SEND SNP
+      // ========================================================
 
       if (
-        currentWithdrawal &&
-        (
-          currentWithdrawal.status ===
-            "fee_submitted"
+        withdrawal.status ===
+          "fee_submitted"
 
-          ||
+        ||
 
-          currentWithdrawal.status ===
-            "fee_paid_pending_payout"
-        )
+        withdrawal.status ===
+          "fee_paid_pending_payout"
       ) {
 
         const claimed =
@@ -6154,13 +5588,9 @@ app.post(
             `,
 
             args: [
-
               id,
-
               verified.id
-
             ]
-
           });
 
 
@@ -6173,11 +5603,10 @@ app.post(
             const payout =
               await sendSnpPayout(
 
-                currentWithdrawal.wallet_address,
+                withdrawal.wallet_address,
 
                 Number(
-                  currentWithdrawal.amount ||
-                  0
+                  withdrawal.amount || 0
                 ),
 
                 id
@@ -6187,10 +5616,16 @@ app.post(
 
             /*
              * IMPORTANT:
-             * query_id is only a diagnostic
-             * reference at this stage.
-             * It is NOT claimed to be a
-             * blockchain transaction hash.
+             *
+             * We DO NOT store query_id as a
+             * transaction hash.
+             *
+             * First the payout is marked
+             * payout_submitted.
+             *
+             * Then we search TON for the
+             * actual transaction containing
+             * this query_id.
              */
 
             await db.execute({
@@ -6198,9 +5633,9 @@ app.post(
               sql: `
                 UPDATE withdrawals
                 SET
-                  status = 'paid',
-                  completed_at = ?,
-                  payout_tx_hash = ?
+                  status = 'payout_submitted',
+                  payout_query_id = ?,
+                  payout_submitted_at = ?
                 WHERE withdrawal_id = ?
                   AND telegram_id = ?
                   AND status = 'processing'
@@ -6208,30 +5643,76 @@ app.post(
 
               args: [
 
-                now(),
+                payout.query_id,
 
-                `query:${payout.query_id}`,
+                now(),
 
                 id,
 
                 verified.id
 
               ]
-
             });
 
 
-            console.log(
-              `Withdrawal ${id} marked PAID`
-            );
+            /*
+             * Try immediately to find the real
+             * blockchain transaction hash.
+             */
+
+            const realTx =
+              await waitForPayoutTransaction(
+                payout.query_id,
+                60000
+              );
 
 
-          } catch (
-            payoutError
-          ) {
+            if (realTx) {
+
+              await db.execute({
+
+                sql: `
+                  UPDATE withdrawals
+                  SET
+                    status = 'paid',
+                    payout_tx_hash = ?,
+                    completed_at = ?
+                  WHERE withdrawal_id = ?
+                    AND telegram_id = ?
+                    AND status = 'payout_submitted'
+                `,
+
+                args: [
+
+                  realTx.tx_hash,
+
+                  now(),
+
+                  id,
+
+                  verified.id
+
+                ]
+              });
+
+
+              console.log(
+                "REAL PAYOUT HASH:",
+                realTx.tx_hash
+              );
+
+            } else {
+
+              console.log(
+                "Payout submitted but real hash not found yet."
+              );
+
+            }
+
+          } catch (payoutError) {
 
             console.error(
-              "SNP payout failed",
+              "SNP payout failed:",
               payoutError
             );
 
@@ -6247,21 +5728,18 @@ app.post(
               `,
 
               args: [
-
                 id,
-
                 verified.id
-
               ]
-
             });
-
           }
-
         }
-
       }
 
+
+      // ========================================================
+      // FINAL RESULT
+      // ========================================================
 
       const fresh =
         await db.execute({
@@ -6271,16 +5749,13 @@ app.post(
             FROM withdrawals
             WHERE withdrawal_id = ?
               AND telegram_id = ?
+            LIMIT 1
           `,
 
           args: [
-
             id,
-
             verified.id
-
           ]
-
         });
 
 
@@ -6294,7 +5769,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -6305,12 +5779,13 @@ app.post(
       res.status(500).json({
 
         error:
-          "Withdrawal verification failed"
+          "Withdrawal verification failed",
+
+        details:
+          error.message
 
       });
-
     }
-
   }
 );
 
@@ -6355,13 +5830,9 @@ app.post(
           `,
 
           args: [
-
             id,
-
             verified.id
-
           ]
-
         });
 
 
@@ -6371,12 +5842,9 @@ app.post(
 
         return res.status(404)
           .json({
-
             error:
               "Withdrawal not found"
-
           });
-
       }
 
 
@@ -6396,7 +5864,6 @@ app.post(
               "This withdrawal can no longer be cancelled"
 
           });
-
       }
 
 
@@ -6412,13 +5879,9 @@ app.post(
           `,
 
           args: [
-
             id,
-
             verified.id
-
           ]
-
         });
 
 
@@ -6444,7 +5907,6 @@ app.post(
             verified.id
 
           ]
-
         });
 
 
@@ -6464,7 +5926,6 @@ app.post(
           `Cancelled ${id}`
 
         );
-
       }
 
 
@@ -6486,7 +5947,6 @@ app.post(
 
       });
 
-
     } catch (error) {
 
       console.error(
@@ -6500,15 +5960,139 @@ app.post(
           "Withdrawal cancellation failed"
 
       });
-
     }
-
   }
 );
 
 
 // ============================================================
-// TELEGRAM WEBHOOK
+// TELEGRAM /START WEBHOOK
+// ============================================================
+
+app.post(
+  "/telegram/webhook",
+  async (req, res) => {
+
+    res.sendStatus(200);
+
+
+    try {
+
+      const update =
+        req.body;
+
+
+      const message =
+        update?.message;
+
+
+      if (
+        !message?.chat?.id
+      ) {
+        return;
+      }
+
+
+      if (
+        message.chat.type !==
+        "private"
+      ) {
+        return;
+      }
+
+
+      const text =
+        String(
+          message.text || ""
+        );
+
+
+      if (
+        !/^\/start(?:@\w+)?(?:\s+.*)?$/i
+          .test(text)
+      ) {
+        return;
+      }
+
+
+      const chatId =
+        message.chat.id;
+
+
+      const photoUrl =
+        "https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true";
+
+
+      const miniAppUrl =
+        "https://sadeghi1315.github.io/sinaps-tap-to-earn/";
+
+
+      await telegramApi(
+        "sendPhoto",
+        {
+
+          chat_id:
+            chatId,
+
+          photo:
+            photoUrl,
+
+          caption:
+`🚀 Welcome to SINAPS
+
+Tap • Earn • Grow
+
+Start earning SNP and build your SINAPS balance.
+
+🎁 Daily Rewards
+⚡ Boosts
+👥 Referral Rewards
+💎 TON Wallet
+
+Your SINAPS journey starts here.`,
+
+          reply_markup: {
+
+            inline_keyboard: [
+
+              [
+
+                {
+
+                  text:
+                    "🚀 START SINAPS",
+
+                  web_app: {
+
+                    url:
+                      miniAppUrl
+
+                  }
+
+                }
+
+              ]
+
+            ]
+
+          }
+
+        }
+      );
+
+    } catch (error) {
+
+      console.error(
+        "Telegram /start error:",
+        error
+      );
+    }
+  }
+);
+
+
+// ============================================================
+// TELEGRAM WEBHOOK SETUP
 // ============================================================
 
 async function setupTelegramWebhook() {
@@ -6520,7 +6104,6 @@ async function setupTelegramWebhook() {
     );
 
     return;
-
   }
 
 
@@ -6548,16 +6131,13 @@ async function setupTelegramWebhook() {
       result
     );
 
-
   } catch (error) {
 
     console.error(
       "Telegram webhook setup failed:",
       error
     );
-
   }
-
 }
 
 
@@ -6581,7 +6161,7 @@ async function start() {
       () => {
 
         console.log(
-          `SINAPS backend v4.2.0 running on ${PORT}`
+          `SINAPS backend v5.0.0 running on ${PORT}`
         );
 
       }
@@ -6596,9 +6176,7 @@ async function start() {
     );
 
     process.exit(1);
-
   }
-
 }
 
 
