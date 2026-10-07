@@ -3852,11 +3852,35 @@ async function initTreasuryPayout() {
 
     treasuryKeyPair = await mnemonicToPrivateKey(words);
     treasuryTonClient = new TonClient({ endpoint: TON_RPC, apiKey: TONCENTER_API_KEY || undefined });
-    treasuryWallet = WalletContractV4.create({ workchain: 0, publicKey: treasuryKeyPair.publicKey });
-
     const expected = Address.parse(TREASURY_WALLET);
-    if (treasuryWallet.address.toString({ bounceable: true, urlSafe: true }) !== expected.toString({ bounceable: true, urlSafe: true })) {
-      throw new Error("TREASURY_MNEMONIC does not belong to TREASURY_WALLET");
+
+const walletV4 = WalletContractV4.create({
+  workchain: 0,
+  publicKey: treasuryKeyPair.publicKey
+});
+
+const walletV3 = WalletContractV3R2.create({
+  workchain: 0,
+  publicKey: treasuryKeyPair.publicKey
+});
+
+const expectedRaw = expected.toRawString();
+
+console.log("Treasury expected:", expectedRaw);
+console.log("Seed V4 address:", walletV4.address.toRawString());
+console.log("Seed V3R2 address:", walletV3.address.toRawString());
+
+if (walletV4.address.toRawString() === expectedRaw) {
+  treasuryWallet = walletV4;
+  console.log("TREASURY WALLET TYPE: V4R2");
+} else if (walletV3.address.toRawString() === expectedRaw) {
+  treasuryWallet = walletV3;
+  console.log("TREASURY WALLET TYPE: V3R2");
+} else {
+  throw new Error(
+    "TREASURY_MNEMONIC does not match Treasury address in V3R2 or V4R2"
+  );
+}
     }
 
     // Derive the treasury's SNP Jetton wallet address through the Jetton master getter.
