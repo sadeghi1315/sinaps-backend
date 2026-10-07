@@ -3840,7 +3840,7 @@ async function initTreasuryPayout() {
   if (treasuryInitPromise) return treasuryInitPromise;
   treasuryInitPromise = (async () => {
     if (!TREASURY_MNEMONIC) throw new Error("TREASURY_MNEMONIC is not configured");
-    const words = TREASURY_MNEMONIC.trim().split(/\\s+/).filter(Boolean);
+    const words = TREASURY_MNEMONIC.trim().split(/\s+/).filter(Boolean);
     if (words.length < 12) throw new Error("TREASURY_MNEMONIC is invalid");
 
     treasuryKeyPair = await mnemonicToPrivateKey(words);
