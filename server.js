@@ -245,7 +245,6 @@ const BOOST_LEVELS = {
 // ============================================================
 
 const TASKS = [
-
   {
     id: "channel",
     name: "Join SINAPS Channel",
@@ -273,10 +272,65 @@ const TASKS = [
     icon: "💎",
     url: "#",
     type: "holder"
+  },
+
+  {
+    id: "twitter",
+    name: "Follow X (Twitter)",
+    reward: 100,
+    icon: "🐦",
+    url: "https://x.com/SINAPS_COIN",
+    type: "external"
+  },
+
+  {
+    id: "like_retweet",
+    name: "Like & Retweet",
+    reward: 50,
+    icon: "👍",
+    url: "https://x.com/SINAPS_COIN",
+    type: "external"
+  },
+
+  {
+    id: "connect_wallet",
+    name: "Connect TON Wallet",
+    reward: 50,
+    icon: "💎",
+    url: "#",
+    type: "wallet"
+  },
+
+  {
+    id: "invite_3",
+    name: "Invite 3 Friends",
+    reward: 300,
+    icon: "👥",
+    url: "#",
+    type: "referral",
+    required: 3
+  },
+
+  {
+    id: "invite_10",
+    name: "Invite 10 Friends",
+    reward: 1500,
+    icon: "👥",
+    url: "#",
+    type: "referral",
+    required: 10
+  },
+
+  {
+    id: "invite_15",
+    name: "Invite 15 Friends",
+    reward: 3000,
+    icon: "👥",
+    url: "#",
+    type: "referral",
+    required: 15
   }
-
 ];
-
 
 // ============================================================
 // BASIC HELPERS
