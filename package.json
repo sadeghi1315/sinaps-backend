@@ -1,13 +1,22 @@
 {
   "name": "sinaps-backend",
   "version": "1.0.0",
+  "description": "SINAPS Telegram Mini App backend",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "express": "^5.1.0",
+    "@libsql/client": "^0.15.9",
+    "@ton/core": "^0.62.0",
+    "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^16.0.0",
     "cors": "^2.8.5",
-    "@libsql/client": "^0.15.15"
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0"
   }
 }
