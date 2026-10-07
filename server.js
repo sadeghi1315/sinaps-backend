@@ -3866,6 +3866,67 @@ function snpRaw(amount) {
   return BigInt(Math.trunc(Number(amount))) * (10n ** BigInt(SNP_DECIMALS));
 }
 
+function normalizeTonAddress(value) {
+  try {
+    return Address.parse(String(value || "")).toRawString();
+  } catch (_) {
+    return String(value || "").trim();
+  }
+}
+
+async function findFeePayment(withdrawal) {
+  const createdAt = Math.floor(Date.parse(String(withdrawal.created_at || "")) / 1000);
+  const startUtime = Number.isFinite(createdAt) && createdAt > 0
+    ? Math.max(0, createdAt - 30)
+    : Math.max(0, Math.floor(Date.now() / 1000) - 900);
+
+  const headers = TONCENTER_API_KEY
+    ? { "X-API-Key": TONCENTER_API_KEY }
+    : {};
+
+  const url = new URL(`${TONCENTER}/transactions`);
+  url.searchParams.set("account", TREASURY_WALLET);
+  url.searchParams.set("start_utime", String(startUtime));
+  url.searchParams.set("limit", "100");
+  url.searchParams.set("sort", "desc");
+
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    throw new Error(`TON Center transaction lookup failed (${response.status})`);
+  }
+
+  const data = await response.json();
+  const transactions = Array.isArray(data.transactions) ? data.transactions : [];
+
+  const expectedSource = normalizeTonAddress(withdrawal.wallet_address);
+  const expectedDestination = normalizeTonAddress(TREASURY_WALLET);
+  const expectedNano = BigInt(String(withdrawal.fee_nano || FEE_NANO));
+
+  for (const tx of transactions) {
+    const msg = tx?.in_msg;
+    if (!msg) continue;
+    if (normalizeTonAddress(msg.destination) !== expectedDestination) continue;
+    if (normalizeTonAddress(msg.source) !== expectedSource) continue;
+    if (msg.bounced === true) continue;
+
+    let value = 0n;
+    try { value = BigInt(String(msg.value || "0")); } catch (_) { continue; }
+    if (value < expectedNano) continue;
+
+    const txTime = Number(tx.now || msg.created_at || 0);
+    if (txTime && txTime < startUtime) continue;
+
+    return {
+      tx_hash: String(tx.hash || msg.hash || ""),
+      msg_hash: String(msg.hash || ""),
+      value: value.toString(),
+      now: txTime || Math.floor(Date.now() / 1000)
+    };
+  }
+
+  return null;
+}
+
 async function sendSnpPayout(destination, amount, withdrawalId) {
   await initTreasuryPayout();
   const destinationAddress = Address.parse(destination);
@@ -4205,71 +4266,125 @@ app.post(
       const withdrawal =
         result.rows[0];
 
-      if (
-        withdrawal.status ===
-        "payment_pending"
-      ) {
+      // IMPORTANT: never trust the client to prove that the 0.1 TON fee was paid.
+      // The connected wallet signs the payment in the Mini App, then this endpoint
+      // verifies the payment on TON Center before any SNP is released.
+      let current = await db.execute({
+        sql: `SELECT * FROM withdrawals WHERE withdrawal_id = ? AND telegram_id = ? LIMIT 1`,
+        args: [id, verified.id]
+      });
+      let currentWithdrawal = current.rows[0];
 
-        await db.execute({
+      if (!currentWithdrawal) {
+        return res.status(404).json({ error: "Withdrawal not found" });
+      }
 
+      if (currentWithdrawal.status === "payment_pending") {
+        let feePayment = null;
+
+        try {
+          feePayment = await findFeePayment(currentWithdrawal);
+        } catch (feeLookupError) {
+          console.error("Fee verification lookup failed", feeLookupError);
+          return res.status(503).json({
+            error: "Could not verify the TON fee yet. Please try again in a few seconds."
+          });
+        }
+
+        if (!feePayment) {
+          return res.status(400).json({
+            error: "The 0.1 TON fee payment has not been confirmed yet. Please wait a few seconds and try again.",
+            status: "payment_pending"
+          });
+        }
+
+        const marked = await db.execute({
           sql: `
             UPDATE withdrawals
-
             SET
               status = 'fee_submitted',
+              fee_tx_hash = ?,
               verified_at = ?
-
             WHERE withdrawal_id = ?
-
               AND telegram_id = ?
-
               AND status = 'payment_pending'
           `,
-
           args: [
+            feePayment.tx_hash || feePayment.msg_hash || "",
             now(),
             id,
             verified.id
           ]
-
         });
 
-      }
-
-      // The fee transaction has been approved by the connected wallet.
-      // Now perform the actual SNP Jetton transfer from the treasury wallet.
-      const current = await db.execute({
-        sql: `SELECT * FROM withdrawals WHERE withdrawal_id = ? AND telegram_id = ? LIMIT 1`,
-        args: [id, verified.id]
-      });
-      const currentWithdrawal = current.rows[0];
-
-      if (currentWithdrawal && currentWithdrawal.status === "fee_submitted") {
-        try {
-          const payout = await sendSnpPayout(
-            currentWithdrawal.wallet_address,
-            Number(currentWithdrawal.amount || 0),
-            id
-          );
-
-          await db.execute({
-            sql: `
-              UPDATE withdrawals
-              SET status = 'paid', completed_at = ?, payout_tx_hash = ?
-              WHERE withdrawal_id = ? AND telegram_id = ? AND status = 'fee_submitted'
-            `,
-            args: [now(), payout.query_id, id, verified.id]
-          });
-        } catch (payoutError) {
-          console.error("SNP payout failed", payoutError);
-          await db.execute({
-            sql: `
-              UPDATE withdrawals
-              SET status = 'fee_paid_pending_payout'
-              WHERE withdrawal_id = ? AND telegram_id = ? AND status = 'fee_submitted'
-            `,
+        if (!marked.rowsAffected) {
+          current = await db.execute({
+            sql: `SELECT * FROM withdrawals WHERE withdrawal_id = ? AND telegram_id = ? LIMIT 1`,
             args: [id, verified.id]
           });
+          currentWithdrawal = current.rows[0];
+        } else {
+          currentWithdrawal = { ...currentWithdrawal, status: 'fee_submitted', fee_tx_hash: feePayment.tx_hash || feePayment.msg_hash || '' };
+        }
+      }
+
+      // fee_submitted is now safe: the TON fee was actually observed on-chain.
+      // If payout previously failed, a later verify call retries it.
+      if (
+        currentWithdrawal &&
+        (currentWithdrawal.status === 'fee_submitted' ||
+         currentWithdrawal.status === 'fee_paid_pending_payout')
+      ) {
+        // Claim the payout job before sending, preventing two simultaneous verify
+        // requests from broadcasting two SNP transfers.
+        const claimed = await db.execute({
+          sql: `
+            UPDATE withdrawals
+            SET status = 'processing'
+            WHERE withdrawal_id = ?
+              AND telegram_id = ?
+              AND status IN ('fee_submitted', 'fee_paid_pending_payout')
+          `,
+          args: [id, verified.id]
+        });
+
+        if (claimed.rowsAffected) {
+          try {
+            const payout = await sendSnpPayout(
+              currentWithdrawal.wallet_address,
+              Number(currentWithdrawal.amount || 0),
+              id
+            );
+
+            // query_id is retained as a diagnostic reference. It is NOT called a
+            // blockchain tx hash. The payout transaction itself is indexed shortly
+            // after broadcast and can be located from the treasury account.
+            await db.execute({
+              sql: `
+                UPDATE withdrawals
+                SET
+                  status = 'paid',
+                  completed_at = ?,
+                  payout_tx_hash = ?
+                WHERE withdrawal_id = ?
+                  AND telegram_id = ?
+                  AND status = 'processing'
+              `,
+              args: [now(), `query:${payout.query_id}`, id, verified.id]
+            });
+          } catch (payoutError) {
+            console.error("SNP payout failed", payoutError);
+            await db.execute({
+              sql: `
+                UPDATE withdrawals
+                SET status = 'fee_paid_pending_payout'
+                WHERE withdrawal_id = ?
+                  AND telegram_id = ?
+                  AND status = 'processing'
+              `,
+              args: [id, verified.id]
+            });
+          }
         }
       }
 
