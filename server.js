@@ -1839,65 +1839,167 @@ Your SINAPS journey starts here.`,
 // SNP HOLDER CHECK
 // ============================================================
 
-async function checkSnpBalance(
-  wallet
-) {
+async function checkSnpBalance(wallet) {
 
   if (!wallet) {
     return false;
   }
 
-  const headers =
-    TONCENTER_API_KEY
-      ? {
-          "X-API-Key":
-            TONCENTER_API_KEY
+  try {
+
+    const headers =
+      TONCENTER_API_KEY
+        ? {
+            "X-API-Key": TONCENTER_API_KEY
+          }
+        : {};
+
+    // Normalize the user's TON address
+    const ownerAddress =
+      Address.parse(
+        String(wallet).trim()
+      ).toString();
+
+    const jettonMasterAddress =
+      Address.parse(
+        SNP_CONTRACT
+      ).toString();
+
+    // IMPORTANT:
+    // owner_address = user's TON wallet
+    // jetton_address = SNP master contract
+    const url =
+      `${TONCENTER}/jetton/wallets` +
+      `?owner_address=${encodeURIComponent(ownerAddress)}` +
+      `&jetton_address=${encodeURIComponent(jettonMasterAddress)}` +
+      `&limit=10`;
+
+    console.log("=================================");
+    console.log("SNP HOLDER CHECK");
+    console.log("Owner wallet:", ownerAddress);
+    console.log("SNP contract:", jettonMasterAddress);
+    console.log("URL:", url);
+    console.log("=================================");
+
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers
         }
-      : {};
+      );
 
-  const url =
-    `${TONCENTER}/jetton/wallets` +
-    `?address=${encodeURIComponent(wallet)}` +
-    `&jetton_address=${encodeURIComponent(SNP_CONTRACT)}`;
+    if (!response.ok) {
 
-  const response =
-    await fetch(
-      url,
-      {
-        headers
-      }
+      const errorText =
+        await response.text().catch(
+          () => ""
+        );
+
+      console.error(
+        "TON Center holder check:",
+        response.status,
+        errorText
+      );
+
+      throw new Error(
+        `Unable to verify SNP balance: ${response.status}`
+      );
+
+    }
+
+    const data =
+      await response.json();
+
+    console.log(
+      "TON Center SNP response:",
+      JSON.stringify(data)
     );
 
-  if (!response.ok) {
+    const wallets =
+      Array.isArray(
+        data?.jetton_wallets
+      )
+        ? data.jetton_wallets
+        : [];
 
-    throw new Error(
-      "Unable to verify SNP balance"
+    if (!wallets.length) {
+
+      console.log(
+        "No SNP Jetton Wallet found for this owner."
+      );
+
+      return false;
+
+    }
+
+    // There should normally be one wallet for this
+    // owner + SNP master combination.
+    const row =
+      wallets.find(
+        item =>
+          String(
+            item?.jetton || ""
+          ).toLowerCase() ===
+          String(
+            SNP_CONTRACT
+          ).toLowerCase()
+      ) ||
+      wallets[0];
+
+    const rawBalance =
+      BigInt(
+        String(
+          row?.balance || "0"
+        )
+      );
+
+    const requiredRaw =
+      BigInt(
+        HOLDER_MIN_SNP
+      ) *
+      1000000000n;
+
+    console.log(
+      "SNP raw balance:",
+      rawBalance.toString()
     );
+
+    console.log(
+      "Required raw balance:",
+      requiredRaw.toString()
+    );
+
+    const balanceSnp =
+      Number(rawBalance) /
+      1000000000;
+
+    console.log(
+      "SNP balance:",
+      balanceSnp
+    );
+
+    const holder =
+      rawBalance >= requiredRaw;
+
+    console.log(
+      "Holder 50,000 SNP:",
+      holder
+    );
+
+    return holder;
+
+  } catch (error) {
+
+    console.error(
+      "checkSnpBalance error:",
+      error
+    );
+
+    throw error;
 
   }
-
-  const data =
-    await response.json();
-
-  const row =
-    data.jetton_wallets?.[0] ||
-    data.wallets?.[0] ||
-    data[0];
-
-  const raw =
-    BigInt(
-      String(
-        row?.balance || "0"
-      )
-    );
-
-  return (
-    raw >=
-    BigInt(
-      HOLDER_MIN_SNP
-    ) *
-    1000000000n
-  );
 
 }
 
