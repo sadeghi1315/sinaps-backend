@@ -244,94 +244,536 @@ const BOOST_LEVELS = {
 // TASKS
 // ============================================================
 
-const TASKS = [
-  {
-    id: "channel",
-    name: "Join SINAPS Channel",
-    reward: 100,
-    icon: "📢",
-    url: "https://t.me/SINAPS_COIN",
-    chat: "@SINAPS_COIN",
-    type: "telegram"
-  },
+app.get(
+  "/api/tasks",
+  async (req, res) => {
 
-  {
-    id: "group",
-    name: "Join SINAPS Group",
-    reward: 70,
-    icon: "👥",
-    url: "https://t.me/SINAPS_Group",
-    chat: "@SINAPS_Group",
-    type: "telegram"
-  },
+    try {
 
-  {
-    id: "holder",
-    name: "Hold 50,000 SNP",
-    reward: 1000,
-    icon: "💎",
-    url: "#",
-    type: "holder"
-  },
+      const verified =
+        requireAuth(req, res);
 
-  {
-    id: "twitter",
-    name: "Follow X (Twitter)",
-    reward: 100,
-    icon: "🐦",
-    url: "https://x.com/SINAPS_COIN",
-    type: "external"
-  },
+      if (!verified) {
+        return;
+      }
 
-  {
-    id: "like_retweet",
-    name: "Like & Retweet",
-    reward: 50,
-    icon: "👍",
-    url: "https://x.com/SINAPS_COIN",
-    type: "external"
-  },
+      const telegramId =
+        String(verified.id);
 
-  {
-    id: "connect_wallet",
-    name: "Connect TON Wallet",
-    reward: 50,
-    icon: "💎",
-    url: "#",
-    type: "wallet"
-  },
+      // Tasks already claimed by this user
+      const claimedResult =
+        await db.execute({
+          sql: `
+            SELECT task_id
+            FROM task_claims
+            WHERE telegram_id = ?
+          `,
+          args: [telegramId]
+        });
 
-  {
-    id: "invite_3",
-    name: "Invite 3 Friends",
-    reward: 300,
-    icon: "👥",
-    url: "#",
-    type: "referral",
-    required: 3
-  },
+      const claimed =
+        new Set(
+          claimedResult.rows.map(
+            row => String(row.task_id)
+          )
+        );
 
-  {
-    id: "invite_10",
-    name: "Invite 10 Friends",
-    reward: 1500,
-    icon: "👥",
-    url: "#",
-    type: "referral",
-    required: 10
-  },
+      // Real referral count
+      const referralResult =
+        await db.execute({
+          sql: `
+            SELECT COUNT(*) AS total
+            FROM users
+            WHERE referred_by = ?
+          `,
+          args: [telegramId]
+        });
 
-  {
-    id: "invite_15",
-    name: "Invite 15 Friends",
-    reward: 3000,
-    icon: "👥",
-    url: "#",
-    type: "referral",
-    required: 15
+      const referralCount =
+        Number(
+          referralResult.rows[0]?.total || 0
+        );
+
+      const tasks =
+        TASKS.map(task => {
+
+          let completed =
+            claimed.has(task.id);
+
+          /*
+           * Referral tasks:
+           * They are NOT considered completed just because
+           * the button was pressed.
+           *
+           * They must have the required number of real referrals.
+           */
+          if (
+            task.type === "referral"
+          ) {
+
+            const required =
+              Number(task.required || 0);
+
+            // If user has not reached the requirement,
+            // it can never show DONE.
+            if (
+              referralCount < required
+            ) {
+              completed = false;
+            }
+
+          }
+
+          return {
+            ...task,
+
+            completed,
+
+            referral_count:
+              task.type === "referral"
+                ? referralCount
+                : undefined,
+
+            action:
+              task.type === "holder"
+                ? "VERIFY"
+                : task.type === "wallet"
+                  ? "CONNECT"
+                  : task.type === "referral"
+                    ? "VERIFY"
+                    : "VERIFY"
+          };
+
+        });
+
+      res.json({
+        ok: true,
+        tasks
+      });
+
+    } catch (error) {
+
+      console.error(
+        "/api/tasks",
+        error
+      );
+
+      res.status(500).json({
+        error:
+          "Tasks could not be loaded"
+      });
+
+    }
+
   }
-];
+);
 
+
+// ============================================================
+// TASK CLAIM
+// ============================================================
+
+app.post(
+  "/api/tasks/claim",
+  async (req, res) => {
+
+    try {
+
+      const verified =
+        requireAuth(req, res);
+
+      if (!verified) {
+        return;
+      }
+
+      const telegramId =
+        String(verified.id);
+
+      const taskId =
+        String(
+          req.body.task_id || ""
+        ).trim();
+
+      const requestedWallet =
+        String(
+          req.body.wallet_address || ""
+        ).trim();
+
+      const task =
+        TASKS.find(
+          item =>
+            String(item.id) === taskId
+        );
+
+      if (!task) {
+
+        return res.status(400).json({
+          error:
+            "Unknown task"
+        });
+
+      }
+
+
+      // --------------------------------------------------------
+      // PREVENT DOUBLE CLAIM
+      // --------------------------------------------------------
+
+      const already =
+        await db.execute({
+          sql: `
+            SELECT id
+            FROM task_claims
+            WHERE telegram_id = ?
+              AND task_id = ?
+            LIMIT 1
+          `,
+          args: [
+            telegramId,
+            taskId
+          ]
+        });
+
+      if (
+        already.rows.length
+      ) {
+
+        return res.status(400).json({
+          error:
+            "Task already completed",
+          already_completed:
+            true
+        });
+
+      }
+
+
+      // --------------------------------------------------------
+      // REFERRAL TASKS
+      // --------------------------------------------------------
+
+      if (
+        task.type === "referral"
+      ) {
+
+        const required =
+          Number(
+            task.required || 0
+          );
+
+        if (
+          required <= 0
+        ) {
+
+          return res.status(400).json({
+            error:
+              "Invalid referral requirement"
+          });
+
+        }
+
+        // IMPORTANT:
+        // Count real users whose referred_by points
+        // to the current Telegram user.
+        const referralResult =
+          await db.execute({
+            sql: `
+              SELECT COUNT(*) AS total
+              FROM users
+              WHERE referred_by = ?
+            `,
+            args: [
+              telegramId
+            ]
+          });
+
+        const referralCount =
+          Number(
+            referralResult.rows[0]?.total || 0
+          );
+
+        console.log(
+          "REFERRAL TASK CHECK:",
+          {
+            telegramId,
+            taskId,
+            required,
+            referralCount
+          }
+        );
+
+        if (
+          referralCount < required
+        ) {
+
+          return res.status(400).json({
+
+            error:
+              `You need ${required} referrals. You currently have ${referralCount}.`,
+
+            required,
+
+            referral_count:
+              referralCount
+
+          });
+
+        }
+
+      }
+
+
+      // --------------------------------------------------------
+      // WALLET TASK
+      // --------------------------------------------------------
+
+      if (
+        task.type === "wallet"
+      ) {
+
+        const user =
+          await getUser(
+            telegramId
+          );
+
+        const wallet =
+          requestedWallet ||
+          String(
+            user?.wallet_address || ""
+          ).trim();
+
+        if (!wallet) {
+
+          return res.status(400).json({
+            error:
+              "Connect your TON wallet first."
+          });
+
+        }
+
+      }
+
+
+      // --------------------------------------------------------
+      // HOLDER TASK
+      // --------------------------------------------------------
+
+      if (
+        task.type === "holder"
+      ) {
+
+        const user =
+          await getUser(
+            telegramId
+          );
+
+        const wallet =
+          requestedWallet ||
+          String(
+            user?.wallet_address || ""
+          ).trim();
+
+        if (!wallet) {
+
+          return res.status(400).json({
+            error:
+              "Connect your TON wallet first."
+          });
+
+        }
+
+        const holder =
+          await checkSnpBalance(
+            wallet
+          );
+
+        if (!holder) {
+
+          return res.status(400).json({
+
+            error:
+              `You need at least ${HOLDER_MIN_SNP.toLocaleString("en-US")} SNP in this wallet.`
+
+          });
+
+        }
+
+      }
+
+
+      // --------------------------------------------------------
+      // TELEGRAM TASKS
+      // --------------------------------------------------------
+
+      if (
+        task.type === "telegram"
+      ) {
+
+        if (!BOT_TOKEN) {
+
+          return res.status(500).json({
+            error:
+              "Telegram verification is not configured"
+          });
+
+        }
+
+        if (!task.chat) {
+
+          return res.status(400).json({
+            error:
+              "Telegram task configuration is missing"
+          });
+
+        }
+
+        const telegramResponse =
+          await fetch(
+            `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(task.chat)}&user_id=${encodeURIComponent(telegramId)}`
+          );
+
+        const telegramData =
+          await telegramResponse.json();
+
+        const status =
+          telegramData?.result?.status;
+
+        const verifiedMember =
+          telegramData?.ok === true &&
+          [
+            "member",
+            "administrator",
+            "creator"
+          ].includes(status);
+
+        if (!verifiedMember) {
+
+          return res.status(400).json({
+
+            error:
+              "You are not a member. Join the Telegram channel/group first."
+
+          });
+
+        }
+
+      }
+
+
+      // --------------------------------------------------------
+      // EXTERNAL TASKS
+      // --------------------------------------------------------
+
+      if (
+        task.type === "external"
+      ) {
+
+        /*
+         * X/Twitter cannot be reliably verified from the browser
+         * without an X API integration.
+         *
+         * Therefore this task is intentionally not treated
+         * as automatically verified here.
+         */
+
+        return res.status(400).json({
+
+          error:
+            "This X task requires manual/API verification."
+
+        });
+
+      }
+
+
+      // --------------------------------------------------------
+      // ALL CHECKS PASSED
+      // --------------------------------------------------------
+
+      await db.execute({
+
+        sql: `
+          INSERT INTO task_claims
+          (
+            telegram_id,
+            task_id,
+            reward,
+            status,
+            created_at
+          )
+          VALUES (?, ?, ?, ?, ?)
+        `,
+
+        args: [
+          telegramId,
+          task.id,
+          Number(task.reward || 0),
+          "Completed",
+          now()
+        ]
+
+      });
+
+
+      // Give reward
+      await rewardUser(
+
+        telegramId,
+
+        Number(
+          task.reward || 0
+        ),
+
+        "TASK",
+
+        task.name
+
+      );
+
+
+      const user =
+        await getUser(
+          telegramId
+        );
+
+
+      res.json({
+
+        ok: true,
+
+        task_id:
+          task.id,
+
+        reward:
+          Number(
+            task.reward || 0
+          ),
+
+        balance:
+          Number(
+            user?.balance || 0
+          )
+
+      });
+
+    } catch (error) {
+
+      console.error(
+        "/api/tasks/claim",
+        error
+      );
+
+      res.status(500).json({
+
+        error:
+          "Task verification failed"
+
+      });
+
+    }
+
+  }
+);
 // ============================================================
 // BASIC HELPERS
 // ============================================================
