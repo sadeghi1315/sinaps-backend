@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
 const { createClient } = require("@libsql/client");
+const { TonClient, WalletContractV4, internal, beginCell, Address } = require("@ton/ton");
+const { mnemonicToPrivateKey } = require("@ton/crypto");
 
 const app = express();
 
@@ -38,6 +40,12 @@ const TONCENTER_API_KEY =
   process.env.TONCENTER_API_KEY || "";
 
 const FEE_NANO = "100000000";
+
+// Treasury signing key used ONLY for SNP payouts. Never put this in frontend code.
+const TREASURY_MNEMONIC = process.env.TREASURY_MNEMONIC || "";
+const TON_RPC = process.env.TON_RPC || "https://toncenter.com/api/v2/jsonRPC";
+const SNP_DECIMALS = 9;
+const TREASURY_JETTON_GAS = process.env.TREASURY_JETTON_GAS || "0.06";
 
 const ENERGY_REGEN_SECONDS = 3;
 
@@ -3820,6 +3828,78 @@ app.get(
 
 
 // ============================================================
+// SNP PAYOUT ENGINE
+// ============================================================
+let treasuryTonClient = null;
+let treasuryWallet = null;
+let treasuryKeyPair = null;
+let treasuryJettonWallet = null;
+let treasuryInitPromise = null;
+
+async function initTreasuryPayout() {
+  if (treasuryInitPromise) return treasuryInitPromise;
+  treasuryInitPromise = (async () => {
+    if (!TREASURY_MNEMONIC) throw new Error("TREASURY_MNEMONIC is not configured");
+    const words = TREASURY_MNEMONIC.trim().split(/\\s+/).filter(Boolean);
+    if (words.length < 12) throw new Error("TREASURY_MNEMONIC is invalid");
+
+    treasuryKeyPair = await mnemonicToPrivateKey(words);
+    treasuryTonClient = new TonClient({ endpoint: TON_RPC, apiKey: TONCENTER_API_KEY || undefined });
+    treasuryWallet = WalletContractV4.create({ workchain: 0, publicKey: treasuryKeyPair.publicKey });
+
+    const expected = Address.parse(TREASURY_WALLET);
+    if (treasuryWallet.address.toString({ bounceable: true, urlSafe: true }) !== expected.toString({ bounceable: true, urlSafe: true })) {
+      throw new Error("TREASURY_MNEMONIC does not belong to TREASURY_WALLET");
+    }
+
+    // Derive the treasury's SNP Jetton wallet address through the Jetton master getter.
+    const { JettonMaster } = require("@ton/ton");
+    const master = treasuryTonClient.open(JettonMaster.create(Address.parse(SNP_CONTRACT)));
+    treasuryJettonWallet = await master.getWalletAddress(expected);
+    return true;
+  })();
+  try { return await treasuryInitPromise; }
+  catch (e) { treasuryInitPromise = null; throw e; }
+}
+
+function snpRaw(amount) {
+  return BigInt(Math.trunc(Number(amount))) * (10n ** BigInt(SNP_DECIMALS));
+}
+
+async function sendSnpPayout(destination, amount, withdrawalId) {
+  await initTreasuryPayout();
+  const destinationAddress = Address.parse(destination);
+  const seqno = await treasuryTonClient.open(treasuryWallet).getSeqno();
+  const queryId = BigInt(Date.now());
+
+  // Standard Jetton transfer payload (TEP-74).
+  const body = beginCell()
+    .storeUint(0x0f8a7ea5, 32)
+    .storeUint(queryId, 64)
+    .storeCoins(snpRaw(amount))
+    .storeAddress(destinationAddress)
+    .storeAddress(Address.parse(TREASURY_WALLET))
+    .storeBit(0)
+    .storeCoins(0)
+    .storeBit(0)
+    .endCell();
+
+  const openedWallet = treasuryTonClient.open(treasuryWallet);
+  await openedWallet.sendTransfer({
+    seqno,
+    secretKey: treasuryKeyPair.secretKey,
+    messages: [internal({
+      to: treasuryJettonWallet,
+      value: TREASURY_JETTON_GAS,
+      bounce: true,
+      body
+    })]
+  });
+
+  return { query_id: queryId.toString(), treasury_jetton_wallet: treasuryJettonWallet.toString() };
+}
+
+// ============================================================
 // WITHDRAW CREATE
 // ============================================================
 
@@ -4154,6 +4234,43 @@ app.post(
 
         });
 
+      }
+
+      // The fee transaction has been approved by the connected wallet.
+      // Now perform the actual SNP Jetton transfer from the treasury wallet.
+      const current = await db.execute({
+        sql: `SELECT * FROM withdrawals WHERE withdrawal_id = ? AND telegram_id = ? LIMIT 1`,
+        args: [id, verified.id]
+      });
+      const currentWithdrawal = current.rows[0];
+
+      if (currentWithdrawal && currentWithdrawal.status === "fee_submitted") {
+        try {
+          const payout = await sendSnpPayout(
+            currentWithdrawal.wallet_address,
+            Number(currentWithdrawal.amount || 0),
+            id
+          );
+
+          await db.execute({
+            sql: `
+              UPDATE withdrawals
+              SET status = 'paid', completed_at = ?, payout_tx_hash = ?
+              WHERE withdrawal_id = ? AND telegram_id = ? AND status = 'fee_submitted'
+            `,
+            args: [now(), payout.query_id, id, verified.id]
+          });
+        } catch (payoutError) {
+          console.error("SNP payout failed", payoutError);
+          await db.execute({
+            sql: `
+              UPDATE withdrawals
+              SET status = 'fee_paid_pending_payout'
+              WHERE withdrawal_id = ? AND telegram_id = ? AND status = 'fee_submitted'
+            `,
+            args: [id, verified.id]
+          });
+        }
       }
 
       const fresh =
