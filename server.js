@@ -3881,7 +3881,7 @@ if (walletV4.address.toRawString() === expectedRaw) {
     "TREASURY_MNEMONIC does not match Treasury address in V3R2 or V4R2"
   );
 }
-    }
+    
 
     // Derive the treasury's SNP Jetton wallet address through the Jetton master getter.
     const { JettonMaster } = require("@ton/ton");
