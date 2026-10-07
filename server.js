@@ -2,7 +2,14 @@ const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
 const { createClient } = require("@libsql/client");
-const { TonClient, WalletContractV4, internal, beginCell, Address } = require("@ton/ton");
+const {
+  TonClient,
+  WalletContractV4,
+  WalletContractV3R2,
+  internal,
+  beginCell,
+  Address
+} = require("@ton/ton");
 const { mnemonicToPrivateKey } = require("@ton/crypto");
 
 const app = express();
