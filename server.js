@@ -2,34 +2,56 @@ const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
 const { createClient } = require("@libsql/client");
+
 const {
   TonClient,
   WalletContractV5R1,
   SendMode,
   internal,
   beginCell,
-  Address
+  Address,
+  JettonMaster
 } = require("@ton/ton");
-const { mnemonicToPrivateKey } = require("@ton/crypto");
+
+const {
+  mnemonicToPrivateKey
+} = require("@ton/crypto");
 
 const app = express();
 
 app.use(cors({
   origin: true,
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "X-Telegram-Init-Data"]
+  allowedHeaders: [
+    "Content-Type",
+    "X-Telegram-Init-Data"
+  ]
 }));
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({
+  limit: "1mb"
+}));
 
-const PORT = process.env.PORT || 10000;
+const PORT =
+  process.env.PORT || 10000;
 
-const DB_URL = process.env.TURSO_DATABASE_URL;
-const DB_TOKEN = process.env.TURSO_AUTH_TOKEN;
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const DB_URL =
+  process.env.TURSO_DATABASE_URL;
+
+const DB_TOKEN =
+  process.env.TURSO_AUTH_TOKEN;
+
+const BOT_TOKEN =
+  process.env.TELEGRAM_BOT_TOKEN;
 
 const BOT_USERNAME =
-  process.env.TELEGRAM_BOT_USERNAME || "SNPCOINBot";
+  process.env.TELEGRAM_BOT_USERNAME ||
+  "SNPCOINBot";
+
+
+// ============================================================
+// SINAPS / TON CONFIG
+// ============================================================
 
 const TREASURY_WALLET =
   process.env.TREASURY_WALLET ||
@@ -44,26 +66,45 @@ const TONCENTER =
   "https://toncenter.com/api/v3";
 
 const TONCENTER_API_KEY =
-  process.env.TONCENTER_API_KEY || "";
+  process.env.TONCENTER_API_KEY ||
+  "";
 
-const FEE_NANO = "100000000";
+const TON_RPC =
+  process.env.TON_RPC ||
+  "https://toncenter.com/api/v2/jsonRPC";
 
-// Treasury signing key used ONLY for SNP payouts. Never put this in frontend code.
-const TREASURY_MNEMONIC = process.env.TREASURY_MNEMONIC || "";
-const TON_RPC = process.env.TON_RPC || "https://toncenter.com/api/v2/jsonRPC";
-const SNP_DECIMALS = 9;
-const TREASURY_JETTON_GAS = process.env.TREASURY_JETTON_GAS || "0.06";
+const TREASURY_MNEMONIC =
+  process.env.TREASURY_MNEMONIC ||
+  "";
 
-const ENERGY_REGEN_SECONDS = 3;
+const FEE_NANO =
+  "100000000";
 
-const REFERRAL_RATE = 0.15;
+const SNP_DECIMALS =
+  9;
 
-const REFERRAL_JOIN_REWARD = 100;
+const TREASURY_JETTON_GAS =
+  process.env.TREASURY_JETTON_GAS ||
+  "0.06";
 
-const HOLDER_MIN_SNP = 50000;
+const ENERGY_REGEN_SECONDS =
+  3;
+
+const REFERRAL_RATE =
+  0.15;
+
+const REFERRAL_JOIN_REWARD =
+  100;
+
+const HOLDER_MIN_SNP =
+  50000;
 
 
-if (!DB_URL || !DB_TOKEN || !BOT_TOKEN) {
+if (
+  !DB_URL ||
+  !DB_TOKEN ||
+  !BOT_TOKEN
+) {
   console.error(
     "Missing TURSO_DATABASE_URL, TURSO_AUTH_TOKEN or TELEGRAM_BOT_TOKEN"
   );
@@ -72,10 +113,26 @@ if (!DB_URL || !DB_TOKEN || !BOT_TOKEN) {
 }
 
 
-const db = createClient({
-  url: DB_URL,
-  authToken: DB_TOKEN
-});
+const db =
+  createClient({
+    url: DB_URL,
+    authToken: DB_TOKEN
+  });
+
+
+// ============================================================
+// TREASURY PAYOUT STATE
+// ============================================================
+
+let treasuryInitPromise = null;
+
+let treasuryKeyPair = null;
+
+let treasuryTonClient = null;
+
+let treasuryWallet = null;
+
+let treasuryJettonWallet = null;
 
 
 // ============================================================
@@ -85,84 +142,99 @@ const db = createClient({
 const BOOST_LEVELS = {
 
   tap: [
+
     {
       level: 2,
       price: 2000,
       name: "Tap ×2",
       description: "2 SNP per tap"
     },
+
     {
       level: 3,
       price: 3000,
       name: "Tap ×3",
       description: "3 SNP per tap"
     },
+
     {
       level: 4,
       price: 5000,
       name: "Tap ×4",
       description: "4 SNP per tap"
     },
+
     {
       level: 5,
       price: 8000,
       name: "Tap ×5",
       description: "5 SNP per tap"
     }
+
   ],
 
   energy: [
+
     {
       level: 2,
       price: 2000,
       name: "Energy ×2",
       description: "Maximum 2,000 energy"
     },
+
     {
       level: 3,
       price: 3500,
       name: "Energy ×3",
       description: "Maximum 3,000 energy"
     },
+
     {
       level: 4,
       price: 6000,
       name: "Energy ×4",
       description: "Maximum 4,000 energy"
     },
+
     {
       level: 5,
       price: 10000,
       name: "Energy ×5",
       description: "Maximum 5,000 energy"
     }
+
   ],
 
   recharge: [
+
     {
       level: 2,
       price: 1500,
       name: "Recharge ×2",
       description: "Energy regenerates 2× faster"
     },
+
     {
       level: 3,
       price: 3000,
       name: "Recharge ×3",
       description: "Energy regenerates 3× faster"
     },
+
     {
       level: 4,
       price: 4500,
       name: "Recharge ×4",
       description: "Energy regenerates 4× faster"
     },
+
     {
       level: 5,
       price: 6500,
       name: "Recharge ×5",
       description: "Energy regenerates 5× faster"
     }
+
   ]
 
 };
@@ -211,17 +283,28 @@ const TASKS = [
 // ============================================================
 
 function now() {
+
   return new Date().toISOString();
+
 }
 
 
 function dateOnly() {
-  return new Date().toISOString().slice(0, 10);
+
+  return new Date()
+    .toISOString()
+    .slice(0, 10);
+
 }
 
 
 function randomCode() {
-  return crypto.randomBytes(5).toString("hex").toUpperCase();
+
+  return crypto
+    .randomBytes(5)
+    .toString("hex")
+    .toUpperCase();
+
 }
 
 
@@ -231,42 +314,79 @@ function parseTime(value) {
     return Date.now();
   }
 
-  const s = String(value);
+  const s =
+    String(value);
 
   const normalized =
     /Z$|[+-]\d\d:\d\d$/.test(s)
       ? s
       : s.replace(" ", "T") + "Z";
 
-  const t = Date.parse(normalized);
+  const t =
+    Date.parse(normalized);
 
   return Number.isFinite(t)
     ? t
     : Date.now();
+
 }
 
 
 function dayDifference(a, b) {
 
   const aa =
-    new Date(`${a}T00:00:00Z`).getTime();
+    new Date(`${a}T00:00:00Z`)
+      .getTime();
 
   const bb =
-    new Date(`${b}T00:00:00Z`).getTime();
+    new Date(`${b}T00:00:00Z`)
+      .getTime();
 
   return Math.round(
     (bb - aa) / 86400000
   );
+
 }
 
 
-function safeInt(value, fallback = 0) {
+function safeInt(
+  value,
+  fallback = 0
+) {
 
-  const n = Number(value);
+  const n =
+    Number(value);
 
   return Number.isFinite(n)
     ? Math.floor(n)
     : fallback;
+
+}
+
+
+// ============================================================
+// SNP RAW AMOUNT
+// ============================================================
+
+function snpRaw(amount) {
+
+  const value =
+    Number(amount);
+
+  if (
+    !Number.isFinite(value) ||
+    value <= 0
+  ) {
+    throw new Error(
+      "Invalid SNP payout amount"
+    );
+  }
+
+  return BigInt(
+    Math.floor(value)
+  ) *
+    1000000000n;
+
 }
 
 
@@ -278,12 +398,17 @@ function verifyTelegram(initData) {
 
   try {
 
-    if (!initData || !BOT_TOKEN) {
+    if (
+      !initData ||
+      !BOT_TOKEN
+    ) {
       return null;
     }
 
     const params =
-      new URLSearchParams(initData);
+      new URLSearchParams(
+        initData
+      );
 
     const hash =
       params.get("hash");
@@ -296,11 +421,13 @@ function verifyTelegram(initData) {
 
     const dataCheckString =
       [...params.entries()]
-        .sort(([a], [b]) =>
-          a.localeCompare(b)
+        .sort(
+          ([a], [b]) =>
+            a.localeCompare(b)
         )
-        .map(([k, v]) =>
-          `${k}=${v}`
+        .map(
+          ([k, v]) =>
+            `${k}=${v}`
         )
         .join("\n");
 
@@ -323,7 +450,13 @@ function verifyTelegram(initData) {
         .digest("hex");
 
     if (
-      expected.length !== hash.length ||
+      expected.length !==
+      hash.length
+    ) {
+      return null;
+    }
+
+    if (
       !crypto.timingSafeEqual(
         Buffer.from(expected),
         Buffer.from(hash)
@@ -334,22 +467,28 @@ function verifyTelegram(initData) {
 
     const authDate =
       Number(
-        params.get("auth_date") || 0
+        params.get("auth_date") ||
+        0
       );
 
     const current =
-      Math.floor(Date.now() / 1000);
+      Math.floor(
+        Date.now() / 1000
+      );
 
     if (
       !authDate ||
-      Math.abs(current - authDate) > 86400
+      Math.abs(
+        current - authDate
+      ) > 86400
     ) {
       return null;
     }
 
     const user =
       JSON.parse(
-        params.get("user") || "{}"
+        params.get("user") ||
+        "{}"
       );
 
     if (!user.id) {
@@ -357,8 +496,13 @@ function verifyTelegram(initData) {
     }
 
     return {
-      id: String(user.id),
-      username: user.username || ""
+
+      id:
+        String(user.id),
+
+      username:
+        user.username || ""
+
     };
 
   } catch (error) {
@@ -369,32 +513,45 @@ function verifyTelegram(initData) {
     );
 
     return null;
+
   }
+
 }
 
 
 function auth(req) {
 
   return verifyTelegram(
-    req.headers["x-telegram-init-data"]
+    req.headers[
+      "x-telegram-init-data"
+    ]
   );
+
 }
 
 
-function requireAuth(req, res) {
+function requireAuth(
+  req,
+  res
+) {
 
-  const user = auth(req);
+  const user =
+    auth(req);
 
   if (!user?.id) {
 
     res.status(401).json({
-      error: "Telegram authentication required"
+
+      error:
+        "Telegram authentication required"
+
     });
 
     return null;
   }
 
   return user;
+
 }
 
 
@@ -402,20 +559,31 @@ function requireAuth(req, res) {
 // DATABASE HELPERS
 // ============================================================
 
-async function getUser(telegramId) {
+async function getUser(
+  telegramId
+) {
 
   const result =
     await db.execute({
+
       sql: `
         SELECT *
         FROM users
         WHERE telegram_id = ?
         LIMIT 1
       `,
-      args: [String(telegramId)]
+
+      args: [
+        String(telegramId)
+      ]
+
     });
 
-  return result.rows[0] || null;
+  return (
+    result.rows[0] ||
+    null
+  );
+
 }
 
 
@@ -440,33 +608,50 @@ function publicUser(user) {
       Number(user.energy || 0),
 
     max_energy:
-      Number(user.max_energy || 1000),
+      Number(
+        user.max_energy || 1000
+      ),
 
     tap_power:
-      Number(user.tap_power || 1),
+      Number(
+        user.tap_power || 1
+      ),
 
     tap_boost_level:
-      Number(user.tap_boost_level || 1),
+      Number(
+        user.tap_boost_level || 1
+      ),
 
     energy_boost_level:
-      Number(user.energy_boost_level || 1),
+      Number(
+        user.energy_boost_level || 1
+      ),
 
     recharge_multiplier:
-      Number(user.recharge_multiplier || 1),
+      Number(
+        user.recharge_multiplier || 1
+      ),
 
     recharge_level:
-      Number(user.recharge_level || 1),
+      Number(
+        user.recharge_level || 1
+      ),
 
     wallet_address:
-      user.wallet_address || null,
+      user.wallet_address ||
+      null,
 
     referral_code:
-      user.referral_code || "",
+      user.referral_code ||
+      "",
 
     referral_rewarded:
-      Number(user.referral_rewarded || 0)
+      Number(
+        user.referral_rewarded || 0
+      )
 
   };
+
 }
 
 
@@ -494,26 +679,38 @@ async function addTransaction(
     `,
 
     args: [
+
       String(telegramId),
+
       type,
+
       Number(amount),
+
       status,
+
       details || "",
+
       now()
+
     ]
 
   });
+
 }
 
 
 // ============================================================
-// ENERGY SYNC
+// ENERGY
 // ============================================================
 
-async function syncEnergy(telegramId) {
+async function syncEnergy(
+  telegramId
+) {
 
   const user =
-    await getUser(telegramId);
+    await getUser(
+      telegramId
+    );
 
   if (!user) {
     return null;
@@ -522,19 +719,25 @@ async function syncEnergy(telegramId) {
   const maxEnergy =
     Math.max(
       1,
-      Number(user.max_energy || 1000)
+      Number(
+        user.max_energy || 1000
+      )
     );
 
   const energy =
     Math.max(
       0,
-      Number(user.energy || 0)
+      Number(
+        user.energy || 0
+      )
     );
 
   const multiplier =
     Math.max(
       1,
-      Number(user.recharge_multiplier || 1)
+      Number(
+        user.recharge_multiplier || 1
+      )
     );
 
   const last =
@@ -543,7 +746,10 @@ async function syncEnergy(telegramId) {
     );
 
   const interval =
-    (ENERGY_REGEN_SECONDS * 1000) /
+    (
+      ENERGY_REGEN_SECONDS *
+      1000
+    ) /
     multiplier;
 
   const gained =
@@ -551,7 +757,8 @@ async function syncEnergy(telegramId) {
       Math.max(
         0,
         Date.now() - last
-      ) / interval
+      ) /
+      interval
     );
 
   if (gained <= 0) {
@@ -568,7 +775,9 @@ async function syncEnergy(telegramId) {
     newEnergy >= maxEnergy
       ? now()
       : new Date(
-          last + gained * interval
+          last +
+          gained *
+          interval
         ).toISOString();
 
   await db.execute({
@@ -582,19 +791,26 @@ async function syncEnergy(telegramId) {
     `,
 
     args: [
+
       newEnergy,
+
       newTime,
+
       String(telegramId)
+
     ]
 
   });
 
-  return getUser(telegramId);
+  return getUser(
+    telegramId
+  );
+
 }
 
 
 // ============================================================
-// REFERRAL COMMISSION
+// REFERRAL
 // ============================================================
 
 async function rewardReferralOwner(
@@ -604,7 +820,9 @@ async function rewardReferralOwner(
 ) {
 
   const user =
-    await getUser(telegramId);
+    await getUser(
+      telegramId
+    );
 
   if (
     !user?.referred_by ||
@@ -634,8 +852,13 @@ async function rewardReferralOwner(
       `,
 
       args: [
+
         bonus,
-        String(user.referred_by)
+
+        String(
+          user.referred_by
+        )
+
       ]
 
     });
@@ -643,24 +866,29 @@ async function rewardReferralOwner(
   if (result.rowsAffected) {
 
     await addTransaction(
+
       user.referred_by,
+
       "REFERRAL",
+
       bonus,
+
       "Completed",
+
       `${source} referral bonus`
+
     );
 
   }
 
   return bonus;
+
 }
 
 
-// ============================================================
-// QUALIFY REFERRAL
-// ============================================================
-
-async function qualifyReferral(telegramId) {
+async function qualifyReferral(
+  telegramId
+) {
 
   try {
 
@@ -684,7 +912,9 @@ async function qualifyReferral(telegramId) {
 
       });
 
-    if (!userResult.rows.length) {
+    if (
+      !userResult.rows.length
+    ) {
       return 0;
     }
 
@@ -697,20 +927,28 @@ async function qualifyReferral(telegramId) {
 
     if (
       !user.wallet_address ||
-      String(user.wallet_address).trim() === ""
+      String(
+        user.wallet_address
+      ).trim() === ""
     ) {
       return 0;
     }
 
     if (
-      Number(user.referral_rewarded || 0) === 1
+      Number(
+        user.referral_rewarded || 0
+      ) === 1
     ) {
       return 0;
     }
 
     if (
-      String(user.referred_by) ===
-      String(user.telegram_id)
+      String(
+        user.referred_by
+      ) ===
+      String(
+        user.telegram_id
+      )
     ) {
       return 0;
     }
@@ -730,14 +968,19 @@ async function qualifyReferral(telegramId) {
         `,
 
         args: [
+
           String(telegramId),
+
           String(telegramId)
+
         ]
 
       });
 
     if (
-      Number(changed.rowsAffected || 0) !== 1
+      Number(
+        changed.rowsAffected || 0
+      ) !== 1
     ) {
       return 0;
     }
@@ -746,20 +989,23 @@ async function qualifyReferral(telegramId) {
       await db.execute({
 
         sql: `
-          SELECT
-            telegram_id
+          SELECT telegram_id
           FROM users
           WHERE telegram_id = ?
           LIMIT 1
         `,
 
         args: [
-          String(user.referred_by)
+          String(
+            user.referred_by
+          )
         ]
 
       });
 
-    if (!referrerResult.rows.length) {
+    if (
+      !referrerResult.rows.length
+    ) {
 
       await db.execute({
 
@@ -776,6 +1022,7 @@ async function qualifyReferral(telegramId) {
       });
 
       return 0;
+
     }
 
     const referrer =
@@ -790,8 +1037,13 @@ async function qualifyReferral(telegramId) {
       `,
 
       args: [
+
         REFERRAL_JOIN_REWARD,
-        String(referrer.telegram_id)
+
+        String(
+          referrer.telegram_id
+        )
+
       ]
 
     });
@@ -824,13 +1076,11 @@ async function qualifyReferral(telegramId) {
     );
 
     return 0;
+
   }
+
 }
 
-
-// ============================================================
-// REWARD USER
-// ============================================================
 
 async function rewardUser(
   telegramId,
@@ -848,25 +1098,39 @@ async function rewardUser(
     `,
 
     args: [
+
       Number(amount),
+
       String(telegramId)
+
     ]
 
   });
 
   await addTransaction(
+
     telegramId,
+
     type,
+
     amount,
+
     "Completed",
+
     details
+
   );
 
   await rewardReferralOwner(
+
     telegramId,
+
     amount,
+
     type
+
   );
+
 }
 
 
@@ -913,15 +1177,21 @@ async function ensureColumn(
   } catch (error) {
 
     if (
-      String(error.message || "")
+      String(
+        error.message || ""
+      )
         .toLowerCase()
-        .includes("duplicate column")
+        .includes(
+          "duplicate column"
+        )
     ) {
       return;
     }
 
     throw error;
+
   }
+
 }
 
 
@@ -977,107 +1247,107 @@ async function initDB() {
 
   `);
 
-  await ensureColumn(
-    "users",
-    "username",
-    "TEXT"
-  );
+  const columns = [
 
-  await ensureColumn(
-    "users",
-    "balance",
-    "INTEGER DEFAULT 0"
-  );
+    [
+      "username",
+      "TEXT"
+    ],
 
-  await ensureColumn(
-    "users",
-    "energy",
-    "INTEGER DEFAULT 1000"
-  );
+    [
+      "balance",
+      "INTEGER DEFAULT 0"
+    ],
 
-  await ensureColumn(
-    "users",
-    "max_energy",
-    "INTEGER DEFAULT 1000"
-  );
+    [
+      "energy",
+      "INTEGER DEFAULT 1000"
+    ],
 
-  await ensureColumn(
-    "users",
-    "last_energy_update",
-    "TEXT"
-  );
+    [
+      "max_energy",
+      "INTEGER DEFAULT 1000"
+    ],
 
-  await ensureColumn(
-    "users",
-    "created_at",
-    "TEXT"
-  );
+    [
+      "last_energy_update",
+      "TEXT"
+    ],
 
-  await ensureColumn(
-    "users",
-    "last_daily_bonus",
-    "TEXT"
-  );
+    [
+      "created_at",
+      "TEXT"
+    ],
 
-  await ensureColumn(
-    "users",
-    "daily_streak",
-    "INTEGER DEFAULT 0"
-  );
+    [
+      "last_daily_bonus",
+      "TEXT"
+    ],
 
-  await ensureColumn(
-    "users",
-    "referral_code",
-    "TEXT"
-  );
+    [
+      "daily_streak",
+      "INTEGER DEFAULT 0"
+    ],
 
-  await ensureColumn(
-    "users",
-    "referred_by",
-    "TEXT"
-  );
+    [
+      "referral_code",
+      "TEXT"
+    ],
 
-  await ensureColumn(
-    "users",
-    "wallet_address",
-    "TEXT"
-  );
+    [
+      "referred_by",
+      "TEXT"
+    ],
 
-  await ensureColumn(
-    "users",
-    "tap_power",
-    "INTEGER DEFAULT 1"
-  );
+    [
+      "wallet_address",
+      "TEXT"
+    ],
 
-  await ensureColumn(
-    "users",
-    "tap_boost_level",
-    "INTEGER DEFAULT 1"
-  );
+    [
+      "tap_power",
+      "INTEGER DEFAULT 1"
+    ],
 
-  await ensureColumn(
-    "users",
-    "energy_boost_level",
-    "INTEGER DEFAULT 1"
-  );
+    [
+      "tap_boost_level",
+      "INTEGER DEFAULT 1"
+    ],
 
-  await ensureColumn(
-    "users",
-    "recharge_multiplier",
-    "INTEGER DEFAULT 1"
-  );
+    [
+      "energy_boost_level",
+      "INTEGER DEFAULT 1"
+    ],
 
-  await ensureColumn(
-    "users",
-    "recharge_level",
-    "INTEGER DEFAULT 1"
-  );
+    [
+      "recharge_multiplier",
+      "INTEGER DEFAULT 1"
+    ],
 
-  await ensureColumn(
-    "users",
-    "referral_rewarded",
-    "INTEGER DEFAULT 0"
-  );
+    [
+      "recharge_level",
+      "INTEGER DEFAULT 1"
+    ],
+
+    [
+      "referral_rewarded",
+      "INTEGER DEFAULT 0"
+    ]
+
+  ];
+
+  for (
+    const [column, definition]
+    of columns
+  ) {
+
+    await ensureColumn(
+      "users",
+      column,
+      definition
+    );
+
+  }
 
 
   await db.execute(`
@@ -1270,7 +1540,9 @@ async function initDB() {
     `);
 
 
-  for (const row of oldUsers.rows) {
+  for (
+    const row of oldUsers.rows
+  ) {
 
     let code =
       randomCode();
@@ -1285,12 +1557,16 @@ async function initDB() {
           LIMIT 1
         `,
 
-        args: [code]
+        args: [
+          code
+        ]
 
       });
 
 
-    while (exists.rows.length) {
+    while (
+      exists.rows.length
+    ) {
 
       code =
         randomCode();
@@ -1303,9 +1579,11 @@ async function initDB() {
             FROM users
             WHERE referral_code = ?
             LIMIT 1
-            `,
+          `,
 
-          args: [code]
+          args: [
+            code
+          ]
 
         });
 
@@ -1321,8 +1599,13 @@ async function initDB() {
       `,
 
       args: [
+
         code,
-        String(row.telegram_id)
+
+        String(
+          row.telegram_id
+        )
+
       ]
 
     });
@@ -1350,22 +1633,29 @@ async function telegramApi(
     await fetch(
       `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
       {
-        method: "POST",
+
+        method:
+          "POST",
 
         headers: {
+
           "Content-Type":
             "application/json"
+
         },
 
         body:
           JSON.stringify(body)
+
       }
     );
 
   const data =
     await response
       .json()
-      .catch(() => ({}));
+      .catch(
+        () => ({})
+      );
 
   if (
     !response.ok ||
@@ -1380,6 +1670,7 @@ async function telegramApi(
   }
 
   return data.result;
+
 }
 
 
@@ -1392,28 +1683,41 @@ async function isTelegramMember(
     await telegramApi(
       "getChatMember",
       {
-        chat_id: chat,
-        user_id: telegramId
+
+        chat_id:
+          chat,
+
+        user_id:
+          telegramId
+
       }
     );
 
   return (
+
     [
       "creator",
       "administrator",
       "member"
-    ].includes(member.status)
+    ].includes(
+      member.status
+    )
+
     ||
+
     (
-      member.status === "restricted" &&
+      member.status ===
+      "restricted" &&
       member.is_member === true
     )
+
   );
+
 }
 
 
 // ============================================================
-// TELEGRAM /START WELCOME MESSAGE
+// TELEGRAM /START
 // ============================================================
 
 app.post(
@@ -1430,7 +1734,9 @@ app.post(
       const message =
         update?.message;
 
-      if (!message?.chat?.id) {
+      if (
+        !message?.chat?.id
+      ) {
         return;
       }
 
@@ -1447,7 +1753,8 @@ app.post(
         );
 
       if (
-        !/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)
+        !/^\/start(?:@\w+)?(?:\s+.*)?$/i
+          .test(text)
       ) {
         return;
       }
@@ -1455,10 +1762,8 @@ app.post(
       const chatId =
         message.chat.id;
 
-
       const photoUrl =
         "https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true";
-
 
       const miniAppUrl =
         "https://sadeghi1315.github.io/sinaps-tap-to-earn/";
@@ -1493,13 +1798,17 @@ Your SINAPS journey starts here.`,
             inline_keyboard: [
 
               [
+
                 {
+
                   text:
                     "🚀 START SINAPS",
 
                   web_app: {
+
                     url:
                       miniAppUrl
+
                   }
 
                 }
@@ -1554,7 +1863,9 @@ async function checkSnpBalance(
   const response =
     await fetch(
       url,
-      { headers }
+      {
+        headers
+      }
     );
 
   if (!response.ok) {
@@ -1582,7 +1893,9 @@ async function checkSnpBalance(
 
   return (
     raw >=
-    BigInt(HOLDER_MIN_SNP) *
+    BigInt(
+      HOLDER_MIN_SNP
+    ) *
     1000000000n
   );
 
@@ -1599,11 +1912,14 @@ app.get(
 
     res.json({
 
-      project: "SINAPS",
+      project:
+        "SINAPS",
 
-      status: "online",
+      status:
+        "online",
 
-      version: "4.1.2"
+      version:
+        "4.2.0"
 
     });
 
@@ -1622,7 +1938,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -1632,11 +1951,13 @@ app.post(
         verified.id;
 
       const username =
-        verified.username || "";
+        verified.username ||
+        "";
 
       const startParam =
         String(
-          req.body.start_param || ""
+          req.body.start_param ||
+          ""
         )
           .trim()
           .toUpperCase();
@@ -1763,12 +2084,19 @@ app.post(
           `,
 
           args: [
+
             telegramId,
+
             username,
+
             now(),
+
             now(),
+
             referralCode,
+
             referredBy
+
           ]
 
         });
@@ -1790,8 +2118,11 @@ app.post(
           `,
 
           args: [
+
             username,
+
             telegramId
+
           ]
 
         });
@@ -1807,7 +2138,8 @@ app.post(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         user:
           publicUser(user)
@@ -1823,8 +2155,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "User load failed"
+
       });
 
     }
@@ -1844,7 +2178,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -1860,10 +2197,13 @@ app.post(
 
       if (!user) {
 
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
+        return res.status(404)
+          .json({
+
+            error:
+              "User not found"
+
+          });
 
       }
 
@@ -1897,52 +2237,61 @@ app.post(
 
       if (usable <= 0) {
 
-        return res.status(400).json({
+        return res.status(400)
+          .json({
 
-          error:
-            "No energy",
+            error:
+              "No energy",
 
-          user:
-            publicUser(user)
+            user:
+              publicUser(user)
 
-        });
+          });
 
       }
 
       const reward =
-        usable * tapPower;
+        usable *
+        tapPower;
 
       const result =
         await db.execute({
 
           sql: `
             UPDATE users
-
             SET
               balance = balance + ?,
               energy = energy - ?,
               last_energy_update = ?
-
             WHERE telegram_id = ?
               AND energy >= ?
           `,
 
           args: [
+
             reward,
+
             usable,
+
             now(),
+
             telegramId,
+
             usable
+
           ]
 
         });
 
       if (!result.rowsAffected) {
 
-        return res.status(409).json({
-          error:
-            "Tap conflict. Try again."
-        });
+        return res.status(409)
+          .json({
+
+            error:
+              "Tap conflict. Try again."
+
+          });
 
       }
 
@@ -1953,7 +2302,8 @@ app.post(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         taps:
           usable,
@@ -1974,8 +2324,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "Tap failed"
+
       });
 
     }
@@ -1993,24 +2345,31 @@ function getBoostLevel(
   type
 ) {
 
-  if (type === "tap") {
+  if (
+    type === "tap"
+  ) {
 
     return Number(
-      user.tap_boost_level || 1
+      user.tap_boost_level ||
+      1
     );
 
   }
 
-  if (type === "energy") {
+  if (
+    type === "energy"
+  ) {
 
     return Number(
-      user.energy_boost_level || 1
+      user.energy_boost_level ||
+      1
     );
 
   }
 
   return Number(
-    user.recharge_level || 1
+    user.recharge_level ||
+    1
   );
 
 }
@@ -2027,7 +2386,10 @@ app.get(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -2040,10 +2402,13 @@ app.get(
 
       if (!user) {
 
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
+        return res.status(404)
+          .json({
+
+            error:
+              "User not found"
+
+          });
 
       }
 
@@ -2079,6 +2444,7 @@ app.get(
               next:
                 next
                   ? {
+
                       ...next,
 
                       icon:
@@ -2087,6 +2453,7 @@ app.get(
                           : type === "energy"
                           ? "🔋"
                           : "🚀"
+
                     }
                   : null
 
@@ -2097,7 +2464,8 @@ app.get(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         balance:
           Number(
@@ -2117,8 +2485,10 @@ app.get(
       );
 
       res.status(500).json({
+
         error:
           "Failed to load boosts"
+
       });
 
     }
@@ -2138,7 +2508,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -2154,10 +2527,13 @@ app.post(
 
       if (!user) {
 
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
+        return res.status(404)
+          .json({
+
+            error:
+              "User not found"
+
+          });
 
       }
 
@@ -2166,12 +2542,17 @@ app.post(
           req.body.type || ""
         );
 
-      if (!BOOST_LEVELS[type]) {
+      if (
+        !BOOST_LEVELS[type]
+      ) {
 
-        return res.status(400).json({
-          error:
-            "Invalid boost type"
-        });
+        return res.status(400)
+          .json({
+
+            error:
+              "Invalid boost type"
+
+          });
 
       }
 
@@ -2190,10 +2571,13 @@ app.post(
 
       if (!next) {
 
-        return res.status(400).json({
-          error:
-            "Maximum level reached"
-        });
+        return res.status(400)
+          .json({
+
+            error:
+              "Maximum level reached"
+
+          });
 
       }
 
@@ -2202,124 +2586,145 @@ app.post(
 
           sql: `
             UPDATE users
-
-            SET balance =
-              balance - ?
-
+            SET balance = balance - ?
             WHERE telegram_id = ?
               AND balance >= ?
           `,
 
           args: [
+
             next.price,
+
             telegramId,
+
             next.price
+
           ]
 
         });
 
-      if (!deducted.rowsAffected) {
+      if (
+        !deducted.rowsAffected
+      ) {
 
-        return res.status(400).json({
+        return res.status(400)
+          .json({
 
-          error:
-            `Not enough SNP. Need ${next.price} SNP.`
+            error:
+              `Not enough SNP. Need ${next.price} SNP.`
 
-        });
+          });
 
       }
 
-      if (type === "tap") {
+      if (
+        type === "tap"
+      ) {
 
         await db.execute({
 
           sql: `
             UPDATE users
-
             SET
               tap_power = ?,
               tap_boost_level = ?
-
             WHERE telegram_id = ?
           `,
 
           args: [
+
             next.level,
+
             next.level,
+
             telegramId
+
           ]
 
         });
 
       }
 
-      if (type === "energy") {
+      if (
+        type === "energy"
+      ) {
 
         const newMax =
-          next.level * 1000;
+          next.level *
+          1000;
 
         const oldMax =
           Number(
-            user.max_energy || 1000
+            user.max_energy ||
+            1000
           );
 
         const oldEnergy =
           Number(
-            user.energy || 0
+            user.energy ||
+            0
           );
 
         const newEnergy =
           Math.min(
             newMax,
             oldEnergy +
-              Math.max(
-                0,
-                newMax - oldMax
-              )
+            Math.max(
+              0,
+              newMax -
+              oldMax
+            )
           );
 
         await db.execute({
 
           sql: `
             UPDATE users
-
             SET
               max_energy = ?,
               energy = ?,
               energy_boost_level = ?
-
             WHERE telegram_id = ?
           `,
 
           args: [
+
             newMax,
+
             newEnergy,
+
             next.level,
+
             telegramId
+
           ]
 
         });
 
       }
 
-      if (type === "recharge") {
+      if (
+        type === "recharge"
+      ) {
 
         await db.execute({
 
           sql: `
             UPDATE users
-
             SET
               recharge_multiplier = ?,
               recharge_level = ?
-
             WHERE telegram_id = ?
           `,
 
           args: [
+
             next.level,
+
             next.level,
+
             telegramId
+
           ]
 
         });
@@ -2342,12 +2747,19 @@ app.post(
         `,
 
         args: [
+
           telegramId,
+
           `${type}${next.level}`,
+
           type,
+
           next.level,
+
           next.price,
+
           now()
+
         ]
 
       });
@@ -2373,7 +2785,8 @@ app.post(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         message:
           `${next.name} activated`,
@@ -2392,8 +2805,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "Boost purchase failed"
+
       });
 
     }
@@ -2403,10 +2818,12 @@ app.post(
 
 
 // ============================================================
-// DAILY HELPERS
+// DAILY
 // ============================================================
 
-function getDailyStatus(user) {
+function getDailyStatus(
+  user
+) {
 
   const today =
     dateOnly();
@@ -2422,17 +2839,21 @@ function getDailyStatus(user) {
     Math.max(
       0,
       Number(
-        user?.daily_streak || 0
+        user?.daily_streak ||
+        0
       )
     );
 
   const claimedToday =
     last === today;
 
-  let nextDay = 1;
+  let nextDay =
+    1;
 
 
-  if (claimedToday) {
+  if (
+    claimedToday
+  ) {
 
     nextDay =
       Math.max(
@@ -2460,22 +2881,23 @@ function getDailyStatus(user) {
         )
       );
 
-  } else {
-
-    nextDay = 1;
-
   }
 
 
-  if (nextDay > 30) {
+  if (
+    nextDay > 30
+  ) {
     nextDay = 1;
   }
 
 
-  let claimedThrough = 0;
+  let claimedThrough =
+    0;
 
 
-  if (claimedToday) {
+  if (
+    claimedToday
+  ) {
 
     claimedThrough =
       Math.min(
@@ -2579,10 +3001,6 @@ function getDailyStatus(user) {
 }
 
 
-// ============================================================
-// DAILY GET
-// ============================================================
-
 app.get(
   "/api/daily",
   async (req, res) => {
@@ -2590,7 +3008,10 @@ app.get(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -2603,19 +3024,25 @@ app.get(
 
       if (!user) {
 
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
+        return res.status(404)
+          .json({
+
+            error:
+              "User not found"
+
+          });
 
       }
 
       const daily =
-        getDailyStatus(user);
+        getDailyStatus(
+          user
+        );
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         daily,
 
@@ -2644,10 +3071,6 @@ app.get(
 );
 
 
-// ============================================================
-// DAILY STATUS
-// ============================================================
-
 app.get(
   "/api/daily/status",
   async (req, res) => {
@@ -2655,7 +3078,10 @@ app.get(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -2668,19 +3094,25 @@ app.get(
 
       if (!user) {
 
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
+        return res.status(404)
+          .json({
+
+            error:
+              "User not found"
+
+          });
 
       }
 
       const daily =
-        getDailyStatus(user);
+        getDailyStatus(
+          user
+        );
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         ...daily
 
@@ -2707,10 +3139,6 @@ app.get(
 );
 
 
-// ============================================================
-// DAILY CLAIM
-// ============================================================
-
 app.post(
   "/api/daily/claim",
   async (req, res) => {
@@ -2718,7 +3146,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -2734,13 +3165,15 @@ app.post(
 
       if (!user) {
 
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
+        return res.status(404)
+          .json({
+
+            error:
+              "User not found"
+
+          });
 
       }
-
 
       const today =
         dateOnly();
@@ -2753,62 +3186,60 @@ app.post(
           : null;
 
 
-      // --------------------------------------------------------
-      // ALREADY CLAIMED TODAY
-      // --------------------------------------------------------
-
-      if (last === today) {
+      if (
+        last === today
+      ) {
 
         const daily =
-          getDailyStatus(user);
+          getDailyStatus(
+            user
+          );
 
-        return res.status(400).json({
+        return res.status(400)
+          .json({
 
-          ok: false,
+            ok:
+              false,
 
-          error:
-            "Daily reward already claimed",
+            error:
+              "Daily reward already claimed",
 
-          claimed_today:
-            true,
+            claimed_today:
+              true,
 
-          claimedToday:
-            true,
+            claimedToday:
+              true,
 
-          today_claimed:
-            true,
+            today_claimed:
+              true,
 
-          todayClaimed:
-            true,
+            todayClaimed:
+              true,
 
-          is_claimed:
-            true,
+            is_claimed:
+              true,
 
-          isClaimed:
-            true,
+            isClaimed:
+              true,
 
-          can_claim:
-            false,
+            can_claim:
+              false,
 
-          canClaim:
-            false,
+            canClaim:
+              false,
 
-          last_claim_date:
-            last,
+            last_claim_date:
+              last,
 
-          daily
+            daily
 
-        });
+          });
 
       }
 
 
-      // --------------------------------------------------------
-      // CALCULATE DAY
-      // --------------------------------------------------------
-
-      let day = 1;
-
+      let day =
+        1;
 
       if (
         last &&
@@ -2820,48 +3251,37 @@ app.post(
 
         day =
           Number(
-            user.daily_streak || 0
+            user.daily_streak ||
+            0
           ) + 1;
 
-      } else {
-
-        day = 1;
-
       }
 
 
-      if (day > 30) {
+      if (
+        day > 30
+      ) {
         day = 1;
       }
-
 
       const reward =
         day * 10;
 
-
-      // --------------------------------------------------------
-      // ATOMIC DAILY UPDATE
-      // --------------------------------------------------------
 
       const updated =
         await db.execute({
 
           sql: `
             UPDATE users
-
             SET
               balance = balance + ?,
               daily_streak = ?,
               last_daily_bonus = ?
-
             WHERE telegram_id = ?
-
               AND
               (
                 last_daily_bonus IS NULL
-
                 OR
-
                 substr(
                   last_daily_bonus,
                   1,
@@ -2889,37 +3309,36 @@ app.post(
 
       if (
         Number(
-          updated.rowsAffected || 0
+          updated.rowsAffected ||
+          0
         ) !== 1
       ) {
 
-        return res.status(409).json({
+        return res.status(409)
+          .json({
 
-          ok: false,
+            ok:
+              false,
 
-          error:
-            "Daily reward already claimed",
+            error:
+              "Daily reward already claimed",
 
-          claimed_today:
-            true,
+            claimed_today:
+              true,
 
-          claimedToday:
-            true,
+            claimedToday:
+              true,
 
-          can_claim:
-            false,
+            can_claim:
+              false,
 
-          canClaim:
-            false
+            canClaim:
+              false
 
-        });
+          });
 
       }
 
-
-      // --------------------------------------------------------
-      // DAILY HISTORY
-      // --------------------------------------------------------
 
       await db.execute({
 
@@ -2949,10 +3368,6 @@ app.post(
       });
 
 
-      // --------------------------------------------------------
-      // TRANSACTION
-      // --------------------------------------------------------
-
       await addTransaction(
 
         telegramId,
@@ -2968,10 +3383,6 @@ app.post(
       );
 
 
-      // --------------------------------------------------------
-      // REFERRAL BONUS
-      // --------------------------------------------------------
-
       await rewardReferralOwner(
 
         telegramId,
@@ -2983,15 +3394,10 @@ app.post(
       );
 
 
-      // --------------------------------------------------------
-      // FRESH USER
-      // --------------------------------------------------------
-
       const fresh =
         await getUser(
           telegramId
         );
-
 
       const daily =
         getDailyStatus(
@@ -2999,13 +3405,10 @@ app.post(
         );
 
 
-      // --------------------------------------------------------
-      // RESPONSE
-      // --------------------------------------------------------
-
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         day,
 
@@ -3051,7 +3454,8 @@ app.post(
 
         streak:
           Number(
-            fresh.daily_streak || day
+            fresh.daily_streak ||
+            day
           ),
 
         daily
@@ -3080,7 +3484,7 @@ app.post(
 
 
 // ============================================================
-// WALLET CONNECT
+// WALLET
 // ============================================================
 
 app.post(
@@ -3090,7 +3494,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3098,7 +3505,8 @@ app.post(
 
       const wallet =
         String(
-          req.body.wallet_address || ""
+          req.body.wallet_address ||
+          ""
         ).trim();
 
       if (
@@ -3106,10 +3514,13 @@ app.post(
         wallet.length > 150
       ) {
 
-        return res.status(400).json({
-          error:
-            "Invalid TON wallet"
-        });
+        return res.status(400)
+          .json({
+
+            error:
+              "Invalid TON wallet"
+
+          });
 
       }
 
@@ -3117,15 +3528,16 @@ app.post(
 
         sql: `
           UPDATE users
-
           SET wallet_address = ?
-
           WHERE telegram_id = ?
         `,
 
         args: [
+
           wallet,
+
           verified.id
+
         ]
 
       });
@@ -3142,7 +3554,8 @@ app.post(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         wallet_address:
           wallet,
@@ -3164,8 +3577,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "Wallet save failed"
+
       });
 
     }
@@ -3174,10 +3589,6 @@ app.post(
 );
 
 
-// ============================================================
-// WALLET DISCONNECT
-// ============================================================
-
 app.post(
   "/api/wallet/disconnect",
   async (req, res) => {
@@ -3185,7 +3596,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3195,9 +3609,7 @@ app.post(
 
         sql: `
           UPDATE users
-
           SET wallet_address = NULL
-
           WHERE telegram_id = ?
         `,
 
@@ -3209,9 +3621,11 @@ app.post(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
-        wallet_address: null
+        wallet_address:
+          null
 
       });
 
@@ -3224,8 +3638,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "Wallet disconnect failed"
+
       });
 
     }
@@ -3234,10 +3650,6 @@ app.post(
 );
 
 
-// ============================================================
-// WALLET GET
-// ============================================================
-
 app.post(
   "/api/wallet/get",
   async (req, res) => {
@@ -3245,7 +3657,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3258,7 +3673,8 @@ app.post(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         wallet_address:
           user?.wallet_address ||
@@ -3275,8 +3691,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "Wallet lookup failed"
+
       });
 
     }
@@ -3296,7 +3714,10 @@ app.get(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3321,13 +3742,16 @@ app.get(
         new Set(
           result.rows.map(
             x =>
-              String(x.task_id)
+              String(
+                x.task_id
+              )
           )
         );
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         tasks:
           TASKS.map(
@@ -3341,7 +3765,8 @@ app.get(
                 ),
 
               action:
-                task.type === "holder"
+                task.type ===
+                "holder"
                   ? "VERIFY"
                   : "JOIN & VERIFY"
 
@@ -3359,8 +3784,10 @@ app.get(
       );
 
       res.status(500).json({
+
         error:
           "Tasks failed"
+
       });
 
     }
@@ -3369,10 +3796,6 @@ app.get(
 );
 
 
-// ============================================================
-// TASK CLAIM
-// ============================================================
-
 app.post(
   "/api/tasks/claim",
   async (req, res) => {
@@ -3380,7 +3803,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3391,7 +3817,8 @@ app.post(
 
       const taskId =
         String(
-          req.body.task_id || ""
+          req.body.task_id ||
+          ""
         );
 
       const task =
@@ -3402,10 +3829,13 @@ app.post(
 
       if (!task) {
 
-        return res.status(400).json({
-          error:
-            "Task not found"
-        });
+        return res.status(400)
+          .json({
+
+            error:
+              "Task not found"
+
+          });
 
       }
 
@@ -3420,18 +3850,26 @@ app.post(
           `,
 
           args: [
+
             telegramId,
+
             taskId
+
           ]
 
         });
 
-      if (existing.rows.length) {
+      if (
+        existing.rows.length
+      ) {
 
-        return res.status(400).json({
-          error:
-            "Task already completed"
-        });
+        return res.status(400)
+          .json({
+
+            error:
+              "Task already completed"
+
+          });
 
       }
 
@@ -3451,12 +3889,13 @@ app.post(
 
           if (!member) {
 
-            return res.status(400).json({
+            return res.status(400)
+              .json({
 
-              error:
-                "Join the channel/group first, then verify."
+                error:
+                  "Join the channel/group first, then verify."
 
-            });
+              });
 
           }
 
@@ -3467,12 +3906,13 @@ app.post(
             error
           );
 
-          return res.status(400).json({
+          return res.status(400)
+            .json({
 
-            error:
-              "Telegram could not verify membership. Make the bot an admin in the channel/group."
+              error:
+                "Telegram could not verify membership. Make the bot an admin in the channel/group."
 
-          });
+            });
 
         }
 
@@ -3498,12 +3938,13 @@ app.post(
 
         if (!wallet) {
 
-          return res.status(400).json({
+          return res.status(400)
+            .json({
 
-            error:
-              "Connect your TON wallet first."
+              error:
+                "Connect your TON wallet first."
 
-          });
+            });
 
         }
 
@@ -3514,12 +3955,13 @@ app.post(
 
         if (!holder) {
 
-          return res.status(400).json({
+          return res.status(400)
+            .json({
 
-            error:
-              `You need at least ${HOLDER_MIN_SNP.toLocaleString("en-US")} SNP in this wallet.`
+              error:
+                `You need at least ${HOLDER_MIN_SNP.toLocaleString("en-US")} SNP in this wallet.`
 
-          });
+            });
 
         }
 
@@ -3541,11 +3983,17 @@ app.post(
         `,
 
         args: [
+
           telegramId,
+
           task.id,
+
           task.reward,
+
           "Completed",
+
           now()
+
         ]
 
       });
@@ -3571,7 +4019,8 @@ app.post(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         reward:
           task.reward,
@@ -3592,8 +4041,10 @@ app.post(
       );
 
       res.status(500).json({
+
         error:
           "Task verification failed"
+
       });
 
     }
@@ -3603,7 +4054,7 @@ app.post(
 
 
 // ============================================================
-// FRIENDS / REFERRAL
+// FRIENDS
 // ============================================================
 
 app.get(
@@ -3613,7 +4064,10 @@ app.get(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3635,11 +4089,8 @@ app.get(
               balance,
               wallet_address,
               referral_rewarded
-
             FROM users
-
             WHERE referred_by = ?
-
             ORDER BY created_at DESC
           `,
 
@@ -3658,13 +4109,9 @@ app.get(
                 SUM(amount),
                 0
               ) AS total
-
             FROM transactions
-
             WHERE telegram_id = ?
-
               AND type = 'REFERRAL'
-
               AND amount > 0
           `,
 
@@ -3675,7 +4122,8 @@ app.get(
         });
 
       const code =
-        user?.referral_code || "";
+        user?.referral_code ||
+        "";
 
       const mapped =
         friends.rows.map(
@@ -3687,14 +4135,16 @@ app.get(
               ),
 
             username:
-              friend.username || "",
+              friend.username ||
+              "",
 
             created_at:
               friend.created_at,
 
             balance:
               Number(
-                friend.balance || 0
+                friend.balance ||
+                0
               ),
 
             wallet_connected:
@@ -3704,7 +4154,8 @@ app.get(
 
             referral_rewarded:
               Number(
-                friend.referral_rewarded || 0
+                friend.referral_rewarded ||
+                0
               ) === 1,
 
             status:
@@ -3717,7 +4168,8 @@ app.get(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         referral_code:
           code,
@@ -3736,7 +4188,8 @@ app.get(
 
         total_earnings:
           Number(
-            earnings.rows[0]?.total || 0
+            earnings.rows[0]?.total ||
+            0
           ),
 
         invite_reward:
@@ -3759,8 +4212,10 @@ app.get(
       );
 
       res.status(500).json({
+
         error:
           "Friends failed"
+
       });
 
     }
@@ -3780,7 +4235,10 @@ app.get(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3792,11 +4250,8 @@ app.get(
           sql: `
             SELECT *
             FROM transactions
-
             WHERE telegram_id = ?
-
             ORDER BY id DESC
-
             LIMIT 100
           `,
 
@@ -3808,7 +4263,8 @@ app.get(
 
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         history:
           result.rows
@@ -3824,8 +4280,10 @@ app.get(
       );
 
       res.status(500).json({
+
         error:
           "History failed"
+
       });
 
     }
@@ -3835,96 +4293,720 @@ app.get(
 
 
 // ============================================================
-// SNP PAYOUT ENGINE
+// W5 TREASURY INITIALIZATION
 // ============================================================
+
+async function initTreasuryPayout() {
+
+  if (
+    treasuryInitPromise
+  ) {
+    return treasuryInitPromise;
+  }
+
+  treasuryInitPromise =
+    (async () => {
+
+      if (
+        !TREASURY_MNEMONIC
+      ) {
+
+        throw new Error(
+          "TREASURY_MNEMONIC is not configured"
+        );
+
+      }
+
+      const words =
+        TREASURY_MNEMONIC
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean);
+
+      if (
+        words.length < 12
+      ) {
+
+        throw new Error(
+          "TREASURY_MNEMONIC is invalid"
+        );
+
+      }
+
+
+      console.log(
+        "Initializing Treasury W5..."
+      );
+
+
+      treasuryKeyPair =
+        await mnemonicToPrivateKey(
+          words
+        );
+
+
+      treasuryTonClient =
+        new TonClient({
+
+          endpoint:
+            TON_RPC,
+
+          apiKey:
+            TONCENTER_API_KEY ||
+            undefined
+
+        });
+
+
+      const expected =
+        Address.parse(
+          TREASURY_WALLET
+        );
+
+
+      treasuryWallet =
+        WalletContractV5R1.create({
+
+          workchain:
+            0,
+
+          publicKey:
+            treasuryKeyPair.publicKey,
+
+          walletId: {
+
+            networkGlobalId:
+              -239
+
+          }
+
+        });
+
+
+      const expectedRaw =
+        expected.toRawString();
+
+      const seedRaw =
+        treasuryWallet
+          .address
+          .toRawString();
+
+
+      console.log(
+        "================================="
+      );
+
+      console.log(
+        "Treasury expected:",
+        expectedRaw
+      );
+
+      console.log(
+        "Seed W5 address:",
+        seedRaw
+      );
+
+
+      if (
+        seedRaw !==
+        expectedRaw
+      ) {
+
+        throw new Error(
+          "TREASURY_MNEMONIC does not match Treasury W5 address"
+        );
+
+      }
+
+
+      console.log(
+        "TREASURY WALLET TYPE: W5 / V5R1"
+      );
+
+
+      const master =
+        treasuryTonClient.open(
+          JettonMaster.create(
+            Address.parse(
+              SNP_CONTRACT
+            )
+          )
+        );
+
+
+      treasuryJettonWallet =
+        await master.getWalletAddress(
+          expected
+        );
+
+
+      console.log(
+        "Treasury SNP Jetton Wallet:",
+        treasuryJettonWallet.toString()
+      );
+
+      console.log(
+        "SNP contract:",
+        SNP_CONTRACT
+      );
+
+      console.log(
+        "================================="
+      );
+
+
+      return true;
+
+    })();
+
+
+  try {
+
+    return await treasuryInitPromise;
+
+  } catch (error) {
+
+    treasuryInitPromise =
+      null;
+
+    throw error;
+
+  }
+
+}
+
+
+// ============================================================
+// FIND TON FEE PAYMENT
+// ============================================================
+
+async function findFeePayment(
+  withdrawal
+) {
+
+  if (!withdrawal) {
+    return null;
+  }
+
+  const source =
+    String(
+      withdrawal.wallet_address ||
+      ""
+    ).trim();
+
+  const destination =
+    String(
+      TREASURY_WALLET ||
+      ""
+    ).trim();
+
+  if (
+    !source ||
+    !destination
+  ) {
+    return null;
+  }
+
+
+  const headers =
+    TONCENTER_API_KEY
+      ? {
+          "X-API-Key":
+            TONCENTER_API_KEY
+        }
+      : {};
+
+
+  const treasury =
+    Address.parse(
+      destination
+    ).toRawString();
+
+
+  const started =
+    withdrawal.created_at
+      ? new Date(
+          withdrawal.created_at
+        ).getTime()
+      : Date.now() -
+        15 * 60 * 1000;
+
+
+  const minTime =
+    started -
+    120000;
+
+
+  console.log(
+    "Checking TON fee payment..."
+  );
+
+  console.log(
+    "Fee source:",
+    source
+  );
+
+  console.log(
+    "Fee destination:",
+    destination
+  );
+
+  console.log(
+    "Required nanoTON:",
+    FEE_NANO
+  );
+
+
+  let url =
+    `${TONCENTER}/transactions` +
+    `?account=${encodeURIComponent(treasury)}` +
+    `&limit=100`;
+
+
+  const response =
+    await fetch(
+      url,
+      {
+        headers
+      }
+    );
+
+
+  if (!response.ok) {
+
+    throw new Error(
+      `TON Center transactions lookup failed: ${response.status}`
+    );
+
+  }
+
+
+  const data =
+    await response.json();
+
+
+  const transactions =
+    Array.isArray(data)
+      ? data
+      : (
+          data.transactions ||
+          data.result ||
+          []
+        );
+
+
+  if (
+    !Array.isArray(
+      transactions
+    )
+  ) {
+    return null;
+  }
+
+
+  for (
+    const tx of transactions
+  ) {
+
+    try {
+
+      const txTime =
+        Number(
+          tx.utime ||
+          tx.now ||
+          tx.timestamp ||
+          0
+        ) * 1000;
+
+
+      if (
+        txTime &&
+        txTime <
+        minTime
+      ) {
+        continue;
+      }
+
+
+      const inMsg =
+        tx.in_msg ||
+        tx.inMessage ||
+        tx.in_message ||
+        null;
+
+
+      if (!inMsg) {
+        continue;
+      }
+
+
+      const value =
+        String(
+          inMsg.value ??
+          inMsg.amount ??
+          inMsg.coins ??
+          "0"
+        );
+
+
+      if (
+        value !==
+        String(FEE_NANO)
+      ) {
+        continue;
+      }
+
+
+      const msgSource =
+        inMsg.source ||
+        inMsg.src ||
+        inMsg.sender ||
+        "";
+
+
+      if (
+        msgSource
+      ) {
+
+        try {
+
+          const srcRaw =
+            Address.parse(
+              String(
+                msgSource
+              )
+            ).toRawString();
+
+          const sourceRaw =
+            Address.parse(
+              source
+            ).toRawString();
+
+          if (
+            srcRaw !==
+            sourceRaw
+          ) {
+            continue;
+          }
+
+        } catch {
+
+          if (
+            String(
+              msgSource
+            ) !==
+            source
+          ) {
+            continue;
+          }
+
+        }
+
+      } else {
+
+        continue;
+
+      }
+
+
+      const destinationFromMsg =
+        inMsg.destination ||
+        inMsg.dest ||
+        inMsg.dst ||
+        "";
+
+
+      if (
+        destinationFromMsg
+      ) {
+
+        try {
+
+          const dstRaw =
+            Address.parse(
+              String(
+                destinationFromMsg
+              )
+            ).toRawString();
+
+          if (
+            dstRaw !==
+            treasury
+          ) {
+            continue;
+          }
+
+        } catch {
+
+          // If destination is unavailable
+          // in this response format,
+          // the transaction is already
+          // queried directly from Treasury.
+
+        }
+
+      }
+
+
+      const txHash =
+        tx.hash ||
+        tx.transaction_hash ||
+        tx.tx_hash ||
+        tx.id ||
+        "";
+
+      const msgHash =
+        inMsg.hash ||
+        inMsg.message_hash ||
+        "";
+
+
+      console.log(
+        "TON fee payment FOUND:",
+        txHash ||
+        msgHash
+      );
+
+
+      return {
+
+        tx_hash:
+          txHash ||
+          msgHash ||
+          "",
+
+        msg_hash:
+          msgHash ||
+          "",
+
+        value:
+          value,
+
+        source:
+          source,
+
+        destination:
+          destination,
+
+        transaction:
+          tx
+
+      };
+
+    } catch (error) {
+
+      console.error(
+        "Fee transaction parse error:",
+        error.message
+      );
+
+    }
+
+  }
+
+
+  console.log(
+    "TON fee payment not found yet."
+  );
+
+
+  return null;
+
+}
+
+
+// ============================================================
+// SEND SNP PAYOUT
+// ============================================================
+
 async function sendSnpPayout(
   destination,
   amount,
   withdrawalId
 ) {
+
   await initTreasuryPayout();
 
-  if (!treasuryWallet) {
+
+  if (
+    !treasuryWallet
+  ) {
+
     throw new Error(
       "Treasury W5 wallet is not initialized"
     );
+
   }
 
-  if (!treasuryJettonWallet) {
+
+  if (
+    !treasuryJettonWallet
+  ) {
+
     throw new Error(
       "Treasury SNP Jetton Wallet is not initialized"
     );
+
   }
 
+
   const destinationAddress =
-    Address.parse(destination);
+    Address.parse(
+      destination
+    );
+
 
   const openedWallet =
-    treasuryTonClient.open(treasuryWallet);
+    treasuryTonClient.open(
+      treasuryWallet
+    );
+
 
   const seqno =
     await openedWallet.getSeqno();
 
+
   const queryId =
-    BigInt(Date.now());
+    BigInt(
+      Date.now()
+    );
+
 
   const body =
     beginCell()
-      .storeUint(0x0f8a7ea5, 32)
-      .storeUint(queryId, 64)
-      .storeCoins(snpRaw(amount))
-      .storeAddress(destinationAddress)
-      .storeAddress(Address.parse(TREASURY_WALLET))
+
+      .storeUint(
+        0x0f8a7ea5,
+        32
+      )
+
+      .storeUint(
+        queryId,
+        64
+      )
+
+      .storeCoins(
+        snpRaw(amount)
+      )
+
+      .storeAddress(
+        destinationAddress
+      )
+
+      .storeAddress(
+        Address.parse(
+          TREASURY_WALLET
+        )
+      )
+
       .storeBit(0)
+
       .storeCoins(0)
+
       .storeBit(0)
+
       .endCell();
 
-  console.log("=================================");
-  console.log("SNP PAYOUT");
-  console.log("Withdrawal:", withdrawalId);
-  console.log("Amount:", amount, "SNP");
-  console.log("Destination:", destinationAddress.toString());
-  console.log("Treasury:", TREASURY_WALLET);
-  console.log("Jetton wallet:", treasuryJettonWallet.toString());
-  console.log("Seqno:", seqno);
-  console.log("Query ID:", queryId.toString());
-  console.log("=================================");
+
+  console.log(
+    "================================="
+  );
+
+  console.log(
+    "SNP PAYOUT"
+  );
+
+  console.log(
+    "Withdrawal:",
+    withdrawalId
+  );
+
+  console.log(
+    "Amount:",
+    amount,
+    "SNP"
+  );
+
+  console.log(
+    "Destination:",
+    destinationAddress.toString()
+  );
+
+  console.log(
+    "Treasury:",
+    TREASURY_WALLET
+  );
+
+  console.log(
+    "Jetton wallet:",
+    treasuryJettonWallet.toString()
+  );
+
+  console.log(
+    "Seqno:",
+    seqno
+  );
+
+  console.log(
+    "Query ID:",
+    queryId.toString()
+  );
+
+  console.log(
+    "================================="
+  );
+
 
   const transfer =
     openedWallet.createTransfer({
+
       seqno,
 
       secretKey:
         treasuryKeyPair.secretKey,
 
       messages: [
+
         internal({
-          to: treasuryJettonWallet,
+
+          to:
+            treasuryJettonWallet,
 
           value:
             TREASURY_JETTON_GAS,
 
-          bounce: true,
+          bounce:
+            true,
 
           body
+
         })
+
       ],
 
       sendMode:
         SendMode.PAY_GAS_SEPARATELY,
 
       timeout:
-        Math.floor(Date.now() / 1000) + 120
+        Math.floor(
+          Date.now() / 1000
+        ) + 120
+
     });
 
-  await openedWallet.send(transfer);
+
+  await openedWallet.send(
+    transfer
+  );
+
 
   console.log(
     "SNP PAYOUT TRANSACTION SUBMITTED"
   );
 
+
   return {
+
     query_id:
       queryId.toString(),
 
@@ -3942,8 +5024,11 @@ async function sendSnpPayout(
 
     withdrawal_id:
       withdrawalId
+
   };
+
 }
+
 
 // ============================================================
 // WITHDRAW CREATE
@@ -3956,7 +5041,10 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
@@ -3977,40 +5065,56 @@ app.post(
           ""
         ).trim();
 
-      if (amount <= 0) {
 
-        return res.status(400).json({
-          error:
-            "Invalid withdrawal amount"
-        });
+      if (
+        amount <= 0
+      ) {
+
+        return res.status(400)
+          .json({
+
+            error:
+              "Invalid withdrawal amount"
+
+          });
 
       }
+
 
       const user =
         await getUser(
           telegramId
         );
 
+
       if (!user) {
 
-        return res.status(404).json({
-          error:
-            "User not found"
-        });
+        return res.status(404)
+          .json({
+
+            error:
+              "User not found"
+
+          });
 
       }
+
 
       if (
         !requestedWallet ||
         requestedWallet.length < 20
       ) {
 
-        return res.status(400).json({
-          error:
-            "Connect your wallet first"
-        });
+        return res.status(400)
+          .json({
+
+            error:
+              "Connect your wallet first"
+
+          });
 
       }
+
 
       if (
         user.wallet_address &&
@@ -4018,14 +5122,16 @@ app.post(
           requestedWallet
       ) {
 
-        return res.status(400).json({
+        return res.status(400)
+          .json({
 
-          error:
-            "Wallet does not match your connected wallet"
+            error:
+              "Wallet does not match your connected wallet"
 
-        });
+          });
 
       }
+
 
       const withdrawalId =
         `SNP-${Date.now()}-${crypto
@@ -4033,36 +5139,44 @@ app.post(
           .toString("hex")
           .toUpperCase()}`;
 
+
       const deducted =
         await db.execute({
 
           sql: `
             UPDATE users
-
-            SET balance =
-              balance - ?
-
+            SET balance = balance - ?
             WHERE telegram_id = ?
-
               AND balance >= ?
           `,
 
           args: [
+
             amount,
+
             telegramId,
+
             amount
+
           ]
 
         });
 
-      if (!deducted.rowsAffected) {
 
-        return res.status(400).json({
-          error:
-            "Not enough SNP"
-        });
+      if (
+        !deducted.rowsAffected
+      ) {
+
+        return res.status(400)
+          .json({
+
+            error:
+              "Not enough SNP"
+
+          });
 
       }
+
 
       try {
 
@@ -4111,6 +5225,7 @@ app.post(
 
         });
 
+
         await addTransaction(
 
           telegramId,
@@ -4125,6 +5240,7 @@ app.post(
 
         );
 
+
       } catch (error) {
 
         await db.execute({
@@ -4136,8 +5252,11 @@ app.post(
           `,
 
           args: [
+
             amount,
+
             telegramId
+
           ]
 
         });
@@ -4146,14 +5265,17 @@ app.post(
 
       }
 
+
       const fresh =
         await getUser(
           telegramId
         );
 
+
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         withdrawal_id:
           withdrawalId,
@@ -4206,11 +5328,15 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
       }
+
 
       const id =
         String(
@@ -4218,133 +5344,259 @@ app.post(
           ""
         );
 
-      const result =
+
+      let current =
         await db.execute({
 
           sql: `
             SELECT *
             FROM withdrawals
-
             WHERE withdrawal_id = ?
-
               AND telegram_id = ?
-
             LIMIT 1
           `,
 
           args: [
+
             id,
+
             verified.id
+
           ]
 
         });
 
-      if (!result.rows.length) {
 
-        return res.status(404).json({
-          error:
-            "Withdrawal not found"
-        });
+      let currentWithdrawal =
+        current.rows[0];
+
+
+      if (
+        !currentWithdrawal
+      ) {
+
+        return res.status(404)
+          .json({
+
+            error:
+              "Withdrawal not found"
+
+          });
 
       }
 
-      const withdrawal =
-        result.rows[0];
 
-      // IMPORTANT: never trust the client to prove that the 0.1 TON fee was paid.
-      // The connected wallet signs the payment in the Mini App, then this endpoint
-      // verifies the payment on TON Center before any SNP is released.
-      let current = await db.execute({
-        sql: `SELECT * FROM withdrawals WHERE withdrawal_id = ? AND telegram_id = ? LIMIT 1`,
-        args: [id, verified.id]
-      });
-      let currentWithdrawal = current.rows[0];
+      // --------------------------------------------------------
+      // VERIFY 0.1 TON FEE
+      // --------------------------------------------------------
 
-      if (!currentWithdrawal) {
-        return res.status(404).json({ error: "Withdrawal not found" });
-      }
+      if (
+        currentWithdrawal.status ===
+        "payment_pending"
+      ) {
 
-      if (currentWithdrawal.status === "payment_pending") {
-        let feePayment = null;
+        let feePayment =
+          null;
+
 
         try {
-          feePayment = await findFeePayment(currentWithdrawal);
-        } catch (feeLookupError) {
-          console.error("Fee verification lookup failed", feeLookupError);
-          return res.status(503).json({
-            error: "Could not verify the TON fee yet. Please try again in a few seconds."
-          });
-        }
 
-        if (!feePayment) {
-          return res.status(400).json({
-            error: "The 0.1 TON fee payment has not been confirmed yet. Please wait a few seconds and try again.",
-            status: "payment_pending"
-          });
-        }
-
-        const marked = await db.execute({
-          sql: `
-            UPDATE withdrawals
-            SET
-              status = 'fee_submitted',
-              fee_tx_hash = ?,
-              verified_at = ?
-            WHERE withdrawal_id = ?
-              AND telegram_id = ?
-              AND status = 'payment_pending'
-          `,
-          args: [
-            feePayment.tx_hash || feePayment.msg_hash || "",
-            now(),
-            id,
-            verified.id
-          ]
-        });
-
-        if (!marked.rowsAffected) {
-          current = await db.execute({
-            sql: `SELECT * FROM withdrawals WHERE withdrawal_id = ? AND telegram_id = ? LIMIT 1`,
-            args: [id, verified.id]
-          });
-          currentWithdrawal = current.rows[0];
-        } else {
-          currentWithdrawal = { ...currentWithdrawal, status: 'fee_submitted', fee_tx_hash: feePayment.tx_hash || feePayment.msg_hash || '' };
-        }
-      }
-
-      // fee_submitted is now safe: the TON fee was actually observed on-chain.
-      // If payout previously failed, a later verify call retries it.
-      if (
-        currentWithdrawal &&
-        (currentWithdrawal.status === 'fee_submitted' ||
-         currentWithdrawal.status === 'fee_paid_pending_payout')
-      ) {
-        // Claim the payout job before sending, preventing two simultaneous verify
-        // requests from broadcasting two SNP transfers.
-        const claimed = await db.execute({
-          sql: `
-            UPDATE withdrawals
-            SET status = 'processing'
-            WHERE withdrawal_id = ?
-              AND telegram_id = ?
-              AND status IN ('fee_submitted', 'fee_paid_pending_payout')
-          `,
-          args: [id, verified.id]
-        });
-
-        if (claimed.rowsAffected) {
-          try {
-            const payout = await sendSnpPayout(
-              currentWithdrawal.wallet_address,
-              Number(currentWithdrawal.amount || 0),
-              id
+          feePayment =
+            await findFeePayment(
+              currentWithdrawal
             );
 
-            // query_id is retained as a diagnostic reference. It is NOT called a
-            // blockchain tx hash. The payout transaction itself is indexed shortly
-            // after broadcast and can be located from the treasury account.
+        } catch (
+          feeLookupError
+        ) {
+
+          console.error(
+            "Fee verification lookup failed",
+            feeLookupError
+          );
+
+          return res.status(503)
+            .json({
+
+              error:
+                "Could not verify the TON fee yet. Please try again in a few seconds."
+
+            });
+
+        }
+
+
+        if (
+          !feePayment
+        ) {
+
+          return res.status(400)
+            .json({
+
+              error:
+                "The 0.1 TON fee payment has not been confirmed yet. Please wait a few seconds and try again.",
+
+              status:
+                "payment_pending"
+
+            });
+
+        }
+
+
+        const marked =
+          await db.execute({
+
+            sql: `
+              UPDATE withdrawals
+              SET
+                status = 'fee_submitted',
+                fee_tx_hash = ?,
+                verified_at = ?
+              WHERE withdrawal_id = ?
+                AND telegram_id = ?
+                AND status = 'payment_pending'
+            `,
+
+            args: [
+
+              feePayment.tx_hash ||
+              feePayment.msg_hash ||
+              "",
+
+              now(),
+
+              id,
+
+              verified.id
+
+            ]
+
+          });
+
+
+        if (
+          !marked.rowsAffected
+        ) {
+
+          current =
             await db.execute({
+
+              sql: `
+                SELECT *
+                FROM withdrawals
+                WHERE withdrawal_id = ?
+                  AND telegram_id = ?
+                LIMIT 1
+              `,
+
+              args: [
+
+                id,
+
+                verified.id
+
+              ]
+
+            });
+
+          currentWithdrawal =
+            current.rows[0];
+
+        } else {
+
+          currentWithdrawal = {
+
+            ...currentWithdrawal,
+
+            status:
+              "fee_submitted",
+
+            fee_tx_hash:
+              feePayment.tx_hash ||
+              feePayment.msg_hash ||
+              ""
+
+          };
+
+        }
+
+      }
+
+
+      // --------------------------------------------------------
+      // SEND SNP
+      // --------------------------------------------------------
+
+      if (
+        currentWithdrawal &&
+        (
+          currentWithdrawal.status ===
+            "fee_submitted"
+
+          ||
+
+          currentWithdrawal.status ===
+            "fee_paid_pending_payout"
+        )
+      ) {
+
+        const claimed =
+          await db.execute({
+
+            sql: `
+              UPDATE withdrawals
+              SET status = 'processing'
+              WHERE withdrawal_id = ?
+                AND telegram_id = ?
+                AND status IN (
+                  'fee_submitted',
+                  'fee_paid_pending_payout'
+                )
+            `,
+
+            args: [
+
+              id,
+
+              verified.id
+
+            ]
+
+          });
+
+
+        if (
+          claimed.rowsAffected
+        ) {
+
+          try {
+
+            const payout =
+              await sendSnpPayout(
+
+                currentWithdrawal.wallet_address,
+
+                Number(
+                  currentWithdrawal.amount ||
+                  0
+                ),
+
+                id
+
+              );
+
+
+            /*
+             * IMPORTANT:
+             * query_id is only a diagnostic
+             * reference at this stage.
+             * It is NOT claimed to be a
+             * blockchain transaction hash.
+             */
+
+            await db.execute({
+
               sql: `
                 UPDATE withdrawals
                 SET
@@ -4355,11 +5607,39 @@ app.post(
                   AND telegram_id = ?
                   AND status = 'processing'
               `,
-              args: [now(), `query:${payout.query_id}`, id, verified.id]
+
+              args: [
+
+                now(),
+
+                `query:${payout.query_id}`,
+
+                id,
+
+                verified.id
+
+              ]
+
             });
-          } catch (payoutError) {
-            console.error("SNP payout failed", payoutError);
+
+
+            console.log(
+              `Withdrawal ${id} marked PAID`
+            );
+
+
+          } catch (
+            payoutError
+          ) {
+
+            console.error(
+              "SNP payout failed",
+              payoutError
+            );
+
+
             await db.execute({
+
               sql: `
                 UPDATE withdrawals
                 SET status = 'fee_paid_pending_payout'
@@ -4367,11 +5647,23 @@ app.post(
                   AND telegram_id = ?
                   AND status = 'processing'
               `,
-              args: [id, verified.id]
+
+              args: [
+
+                id,
+
+                verified.id
+
+              ]
+
             });
+
           }
+
         }
+
       }
+
 
       const fresh =
         await db.execute({
@@ -4379,22 +5671,25 @@ app.post(
           sql: `
             SELECT *
             FROM withdrawals
-
             WHERE withdrawal_id = ?
-
               AND telegram_id = ?
           `,
 
           args: [
+
             id,
+
             verified.id
+
           ]
 
         });
 
+
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         withdrawal:
           fresh.rows[0]
@@ -4433,11 +5728,15 @@ app.post(
     try {
 
       const verified =
-        requireAuth(req, res);
+        requireAuth(
+          req,
+          res
+        );
 
       if (!verified) {
         return;
       }
+
 
       const id =
         String(
@@ -4445,96 +5744,111 @@ app.post(
           ""
         );
 
+
       const result =
         await db.execute({
 
           sql: `
             SELECT *
             FROM withdrawals
-
             WHERE withdrawal_id = ?
-
               AND telegram_id = ?
-
             LIMIT 1
           `,
 
           args: [
+
             id,
+
             verified.id
+
           ]
 
         });
 
-      if (!result.rows.length) {
 
-        return res.status(404).json({
-          error:
-            "Withdrawal not found"
-        });
+      if (
+        !result.rows.length
+      ) {
+
+        return res.status(404)
+          .json({
+
+            error:
+              "Withdrawal not found"
+
+          });
 
       }
 
+
       const withdrawal =
         result.rows[0];
+
 
       if (
         withdrawal.status !==
         "payment_pending"
       ) {
 
-        return res.status(400).json({
+        return res.status(400)
+          .json({
 
-          error:
-            "This withdrawal can no longer be cancelled"
+            error:
+              "This withdrawal can no longer be cancelled"
 
-        });
+          });
 
       }
+
 
       const changed =
         await db.execute({
 
           sql: `
             UPDATE withdrawals
-
             SET status = 'cancelled'
-
             WHERE withdrawal_id = ?
-
               AND telegram_id = ?
-
               AND status = 'payment_pending'
           `,
 
           args: [
+
             id,
+
             verified.id
+
           ]
 
         });
 
-      if (changed.rowsAffected) {
+
+      if (
+        changed.rowsAffected
+      ) {
 
         await db.execute({
 
           sql: `
             UPDATE users
-
-            SET balance =
-              balance + ?
-
+            SET balance = balance + ?
             WHERE telegram_id = ?
           `,
 
           args: [
+
             Number(
-              withdrawal.amount || 0
+              withdrawal.amount ||
+              0
             ),
+
             verified.id
+
           ]
 
         });
+
 
         await addTransaction(
 
@@ -4543,7 +5857,8 @@ app.post(
           "WITHDRAW",
 
           Number(
-            withdrawal.amount || 0
+            withdrawal.amount ||
+            0
           ),
 
           "Refunded",
@@ -4554,14 +5869,17 @@ app.post(
 
       }
 
+
       const user =
         await getUser(
           verified.id
         );
 
+
       res.json({
 
-        ok: true,
+        ok:
+          true,
 
         balance:
           Number(
@@ -4592,7 +5910,7 @@ app.post(
 
 
 // ============================================================
-// SET TELEGRAM WEBHOOK
+// TELEGRAM WEBHOOK
 // ============================================================
 
 async function setupTelegramWebhook() {
@@ -4604,25 +5922,34 @@ async function setupTelegramWebhook() {
     );
 
     return;
+
   }
+
 
   const webhookUrl =
     "https://sinaps-backend.onrender.com/telegram/webhook";
+
 
   try {
 
     const result =
       await telegramApi(
+
         "setWebhook",
+
         {
-          url: webhookUrl
+          url:
+            webhookUrl
         }
+
       );
+
 
     console.log(
       "Telegram webhook:",
       result
     );
+
 
   } catch (error) {
 
@@ -4648,15 +5975,19 @@ async function start() {
 
     await setupTelegramWebhook();
 
+
     app.listen(
+
       PORT,
+
       () => {
 
         console.log(
-          `SINAPS backend v4.1.2 running on ${PORT}`
+          `SINAPS backend v4.2.0 running on ${PORT}`
         );
 
       }
+
     );
 
   } catch (error) {
