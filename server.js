@@ -3316,16 +3316,20 @@ app.post("/api/spin/claim", async (req, res) => {
     }
     const countResult = await tx.execute({ sql: `SELECT COUNT(*) AS n FROM spin_history WHERE telegram_id = ?`, args: [id] });
     const spinNumber = Number(countResult.rows[0]?.n || 0) + 1;
-    // TON jackpot is exactly 1% from the 10th spin onward. It is recorded as a payout due, not silently added to SNP balance.
-    let prizeType = "NONE", reward = 0, prizeIndex = 6;
+    // Nine visible sectors: six SNP prizes, one gold TON sector, and two no-prize sectors.
+    // The 0.1 TON jackpot is a separate 1% roll from lifetime spin #10 onward.
+    let prizeType = "NONE", reward = 0, prizeIndex = 7;
     const jackpot = spinNumber >= 10 && crypto.randomInt(100) === 0;
-    if (jackpot) { prizeType = "TON"; reward = 0.1; prizeIndex = 7; }
-    else {
-      // Eight equal wheel slots: six SNP rewards and two no-prize slots; jackpot roll is separate from the wheel.
-      const slot = crypto.randomInt(8);
-      prizeIndex = slot;
-      const rewards = [10, 25, 50, 100, 250, 500, 0, 0];
-      reward = rewards[slot];
+    if (jackpot) {
+      prizeType = "TON";
+      reward = 0.1;
+      prizeIndex = 6;
+    } else {
+      // Keep the TON sector out of the ordinary random selection.
+      const normalSlots = [0, 1, 2, 3, 4, 5, 7, 8];
+      prizeIndex = normalSlots[crypto.randomInt(normalSlots.length)];
+      const rewards = { 0: 10, 1: 25, 2: 50, 3: 100, 4: 250, 5: 500, 7: 0, 8: 0 };
+      reward = rewards[prizeIndex];
       prizeType = reward > 0 ? "SNP" : "NONE";
     }
     await tx.execute({ sql: `INSERT INTO spin_history (telegram_id, spin_number, ticket_id, spin_kind, prize_type, reward, prize_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, args: [id, spinNumber, ticket ? Number(ticket.id) : null, spinKind, prizeType, reward, prizeIndex, stamp] });
