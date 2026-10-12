@@ -267,7 +267,7 @@ const TASKS = [
     icon: "𝕏",
     reward: 100,
     type: "external",
-    url: "https://x.com/SINAPS_COIN"
+    url: "https://x.com/SINAPS_SNP"
   },
 
   {
@@ -277,7 +277,7 @@ const TASKS = [
     icon: "❤️",
     reward: 50,
     type: "external",
-    url: "https://x.com/SINAPS_COIN"
+    url: "https://x.com/SINAPS_SNP/status/2099008238251311432"
   },
 
   {
