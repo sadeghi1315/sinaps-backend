@@ -1274,6 +1274,20 @@ async function initDB() {
   await db.execute(`CREATE TABLE IF NOT EXISTS spin_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT NOT NULL, spin_number INTEGER NOT NULL, ticket_id INTEGER, spin_kind TEXT NOT NULL, prize_type TEXT NOT NULL, reward REAL NOT NULL DEFAULT 0, prize_index INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(telegram_id, spin_number)
   )`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS spin_ton_payouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spin_history_id INTEGER NOT NULL UNIQUE,
+    telegram_id TEXT NOT NULL,
+    wallet_address TEXT,
+    amount_ton TEXT NOT NULL DEFAULT '0.1',
+    status TEXT NOT NULL DEFAULT 'pending',
+    payout_query_id TEXT,
+    payout_tx_hash TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    submitted_at TEXT,
+    completed_at TEXT
+  )`);
 
   await db.execute(`
 
@@ -3270,6 +3284,80 @@ async function getTaskStatus(
 
 
 // ============================================================
+// AUTOMATIC 0.1 TON SPIN PAYOUT
+// ============================================================
+async function submitSpinTonPayout(spinHistoryId) {
+  const result = await db.execute({
+    sql: `SELECT p.*, h.spin_number FROM spin_ton_payouts p JOIN spin_history h ON h.id = p.spin_history_id WHERE p.spin_history_id = ? LIMIT 1`,
+    args: [Number(spinHistoryId)]
+  });
+  const payout = result.rows[0];
+  if (!payout) throw new Error("Spin TON payout record not found");
+  if (["submitted", "paid", "submitting", "review_required"].includes(String(payout.status))) return payout;
+
+  const walletText = String(payout.wallet_address || "").trim();
+  if (!walletText) {
+    await db.execute({
+      sql: `UPDATE spin_ton_payouts SET status = 'wallet_required', error_message = ? WHERE spin_history_id = ? AND status IN ('pending','wallet_required')`,
+      args: ["Connect a TON wallet to receive this prize, then request payout again.", Number(spinHistoryId)]
+    });
+    return { ...payout, status: "wallet_required" };
+  }
+
+  // Validate wallet and treasury configuration before reserving the one-time send.
+  const destination = Address.parse(walletText);
+  await initTreasuryPayout();
+  const queryId = crypto.randomBytes(8).readBigUInt64BE(0).toString();
+  const reservation = await db.execute({
+    sql: `UPDATE spin_ton_payouts SET status = 'submitting', wallet_address = ?, payout_query_id = ?, error_message = NULL WHERE spin_history_id = ? AND status IN ('pending','wallet_required')`,
+    args: [destination.toString(), queryId, Number(spinHistoryId)]
+  });
+  if (Number(reservation.rowsAffected || 0) !== 1) {
+    const latest = await db.execute({ sql: `SELECT * FROM spin_ton_payouts WHERE spin_history_id = ? LIMIT 1`, args: [Number(spinHistoryId)] });
+    return latest.rows[0] || payout;
+  }
+
+  try {
+    const openedWallet = treasuryTonClient.open(treasuryWallet);
+    const seqno = await openedWallet.getSeqno();
+    const comment = `SINAPS-SPIN:${Number(spinHistoryId)}:${queryId}`;
+    const body = beginCell().storeUint(0, 32).storeStringTail(comment).endCell();
+    const transfer = openedWallet.createTransfer({
+      seqno,
+      secretKey: treasuryKeyPair.secretKey,
+      messages: [internal({ to: destination, value: "0.1", bounce: false, body })],
+      sendMode: SendMode.PAY_GAS_SEPARATELY,
+      timeout: Math.floor(Date.now() / 1000) + 120
+    });
+    await openedWallet.send(transfer);
+    const stamp = now();
+    await db.execute({
+      sql: `UPDATE spin_ton_payouts SET status = 'submitted', submitted_at = ?, error_message = NULL WHERE spin_history_id = ? AND status = 'submitting'`,
+      args: [stamp, Number(spinHistoryId)]
+    });
+    await db.execute({
+      sql: `UPDATE transactions SET status = 'Submitted', details = ? WHERE telegram_id = ? AND type = 'SPIN_TON' AND details LIKE ?`,
+      args: [`0.1 TON payout submitted to ${destination.toString()}; correlation ${comment}; blockchain confirmation pending`, String(payout.telegram_id), `%spin #${payout.spin_number};%`]
+    });
+    console.log("SPIN TON PAYOUT SUBMITTED", { spinHistoryId, telegramId: String(payout.telegram_id), destination: destination.toString(), queryId, seqno });
+    return { ...payout, status: "submitted", payout_query_id: queryId, wallet_address: destination.toString(), submitted_at: stamp };
+  } catch (error) {
+    // Never automatically retry an uncertain send: it may already have reached the network.
+    const message = String(error?.message || error).slice(0, 500);
+    await db.execute({
+      sql: `UPDATE spin_ton_payouts SET status = 'review_required', error_message = ? WHERE spin_history_id = ? AND status = 'submitting'`,
+      args: [message, Number(spinHistoryId)]
+    });
+    await db.execute({
+      sql: `UPDATE transactions SET status = 'Review Required', details = ? WHERE telegram_id = ? AND type = 'SPIN_TON' AND details LIKE ?`,
+      args: [`0.1 TON payout send outcome needs manual verification; no automatic retry. Error: ${message}`, String(payout.telegram_id), `%spin #${payout.spin_number};%`]
+    });
+    console.error("SPIN TON PAYOUT REQUIRES REVIEW", { spinHistoryId, message });
+    return { ...payout, status: "review_required", error_message: message };
+  }
+}
+
+// ============================================================
 // DAILY SPIN — one free spin every rolling 24 hours + referral tickets
 // ============================================================
 app.get("/api/spin/status", async (req, res) => {
@@ -3332,23 +3420,59 @@ app.post("/api/spin/claim", async (req, res) => {
       reward = rewards[prizeIndex];
       prizeType = reward > 0 ? "SNP" : "NONE";
     }
-    await tx.execute({ sql: `INSERT INTO spin_history (telegram_id, spin_number, ticket_id, spin_kind, prize_type, reward, prize_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, args: [id, spinNumber, ticket ? Number(ticket.id) : null, spinKind, prizeType, reward, prizeIndex, stamp] });
+    const spinInsert = await tx.execute({ sql: `INSERT INTO spin_history (telegram_id, spin_number, ticket_id, spin_kind, prize_type, reward, prize_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, args: [id, spinNumber, ticket ? Number(ticket.id) : null, spinKind, prizeType, reward, prizeIndex, stamp] });
+    const spinHistoryId = Number(spinInsert.lastInsertRowid);
     if (prizeType === "SNP" && reward > 0) {
       const credited = await tx.execute({ sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`, args: [reward, id] });
       if (Number(credited.rowsAffected || 0) !== 1) throw new Error("Could not credit spin reward");
       await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'SPIN', ?, 'Completed', ?, ?)`, args: [id, reward, `Spin #${spinNumber} ${spinKind} reward`, stamp] });
     } else if (prizeType === "TON") {
-      await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'SPIN_TON', 0, 'Pending', ?, ?)`, args: [`${id}`, `0.1 TON jackpot won on spin #${spinNumber}; payout pending manual/treasury processing`, stamp] });
+      const spinUser = await tx.execute({ sql: `SELECT wallet_address FROM users WHERE telegram_id = ? LIMIT 1`, args: [id] });
+      const walletAddress = String(spinUser.rows[0]?.wallet_address || "").trim() || null;
+      await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'SPIN_TON', 0, 'Pending', ?, ?)`, args: [`${id}`, `0.1 TON jackpot won on spin #${spinNumber}; automatic payout queued`, stamp] });
+      await tx.execute({ sql: `INSERT INTO spin_ton_payouts (spin_history_id, telegram_id, wallet_address, amount_ton, status, created_at) VALUES (?, ?, ?, '0.1', 'pending', ?)`, args: [spinHistoryId, id, walletAddress, stamp] });
     } else {
       await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'SPIN', 0, 'Completed', ?, ?)`, args: [id, `No prize on spin #${spinNumber}`, stamp] });
     }
     await tx.commit(); tx = null;
+    let tonPayout = null;
+    if (prizeType === "TON") {
+      try {
+        tonPayout = await submitSpinTonPayout(spinHistoryId);
+      } catch (payoutError) {
+        console.error("Spin saved but TON payout did not submit", payoutError);
+        tonPayout = { status: "pending" };
+      }
+    }
     const user = await getUser(id);
-    res.json({ ok: true, reward, prize_type: prizeType, prize_index: prizeIndex, spin_number: spinNumber, spin_kind: spinKind, tickets_used: spinKind === "ticket", free_ready: false, user: publicUser(user) });
+    res.json({ ok: true, reward, prize_type: prizeType, prize_index: prizeIndex, spin_number: spinNumber, spin_kind: spinKind, tickets_used: spinKind === "ticket", free_ready: false, ton_payout_status: tonPayout?.status || null, ton_payout_message: prizeType === "TON" ? (tonPayout?.status === "submitted" ? "TON payout submitted; blockchain confirmation is pending." : tonPayout?.status === "wallet_required" ? "Connect a TON wallet to receive this prize." : tonPayout?.status === "review_required" ? "Payout requires treasury review; do not retry automatically." : "TON payout is pending.") : null, user: publicUser(user) });
   } catch (error) {
     try { if (tx) await tx.rollback(); } catch (_) {}
     console.error("/api/spin/claim", error);
     res.status(500).json({ error: "Spin could not be completed" });
+  }
+});
+
+// Ask the server to submit a previously won TON prize after a wallet was connected.
+app.post("/api/spin/ton-payout/claim", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const id = String(verified.id);
+    const latest = await db.execute({
+      sql: `SELECT p.spin_history_id, p.status FROM spin_ton_payouts p WHERE p.telegram_id = ? AND p.status IN ('pending','wallet_required') ORDER BY p.id DESC LIMIT 1`,
+      args: [id]
+    });
+    if (!latest.rows[0]) return res.status(404).json({ error: "No eligible unpaid TON spin prize found." });
+    const user = await getUser(id);
+    const wallet = String(user?.wallet_address || "").trim();
+    if (!wallet) return res.status(400).json({ error: "Connect your TON wallet first." });
+    await db.execute({ sql: `UPDATE spin_ton_payouts SET wallet_address = ?, status = 'pending', error_message = NULL WHERE spin_history_id = ? AND status IN ('pending','wallet_required')`, args: [wallet, Number(latest.rows[0].spin_history_id)] });
+    const payout = await submitSpinTonPayout(Number(latest.rows[0].spin_history_id));
+    return res.json({ ok: true, status: payout.status, message: payout.status === "submitted" ? "TON payout submitted; blockchain confirmation is pending." : "Payout status: " + payout.status });
+  } catch (error) {
+    console.error("/api/spin/ton-payout/claim", error);
+    return res.status(500).json({ error: "TON prize payout could not be submitted." });
   }
 });
 
