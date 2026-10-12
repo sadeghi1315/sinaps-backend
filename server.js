@@ -844,9 +844,11 @@ async function getReferralCount(
         SELECT COUNT(*) AS total
         FROM users
         WHERE referred_by = ?
+          AND telegram_id != ?
       `,
 
       args: [
+        String(telegramId),
         String(telegramId)
       ]
     });
@@ -871,6 +873,8 @@ async function rewardReferralOwner(
   if (
     !user?.referred_by ||
     !user?.wallet_address ||
+    Number(user?.referral_rewarded || 0) !== 1 ||
+    String(user.referred_by) === String(user.telegram_id) ||
     Number(rewardAmount) <= 0
   ) {
     return 0;
@@ -916,139 +920,81 @@ async function rewardReferralOwner(
 }
 
 
-async function qualifyReferral(
-  telegramId
-) {
-
+async function qualifyReferral(telegramId) {
+  // The flag, inviter balance and ledger row must commit together.
+  // Otherwise a transient database error can consume the flag without paying.
+  let tx;
   try {
-
-    const user =
-      await getUser(
-        telegramId
-      );
-
-    if (!user) {
+    tx = await db.transaction("write");
+    const userResult = await tx.execute({
+      sql: `SELECT telegram_id, referred_by, wallet_address, referral_rewarded
+            FROM users WHERE telegram_id = ? LIMIT 1`,
+      args: [String(telegramId)]
+    });
+    const user = userResult.rows[0];
+    if (!user || !user.referred_by || !user.wallet_address ||
+        Number(user.referral_rewarded || 0) === 1 ||
+        String(user.referred_by) === String(user.telegram_id)) {
+      await tx.rollback();
       return 0;
     }
 
-    if (!user.referred_by) {
+    const inviterResult = await tx.execute({
+      sql: `SELECT telegram_id FROM users WHERE telegram_id = ? LIMIT 1`,
+      args: [String(user.referred_by)]
+    });
+    if (!inviterResult.rows.length) {
+      await tx.rollback();
       return 0;
     }
 
-    if (!user.wallet_address) {
+    const claimed = await tx.execute({
+      sql: `UPDATE users SET referral_rewarded = 1
+            WHERE telegram_id = ? AND referral_rewarded = 0
+              AND referred_by = ? AND wallet_address IS NOT NULL
+              AND wallet_address != ''`,
+      args: [String(telegramId), String(user.referred_by)]
+    });
+    if (Number(claimed.rowsAffected || 0) !== 1) {
+      await tx.rollback();
       return 0;
     }
 
-    if (
-      Number(
-        user.referral_rewarded || 0
-      ) === 1
-    ) {
-      return 0;
+    const credited = await tx.execute({
+      sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`,
+      args: [REFERRAL_JOIN_REWARD, String(user.referred_by)]
+    });
+    if (Number(credited.rowsAffected || 0) !== 1) {
+      throw new Error("Referral inviter balance could not be updated");
     }
 
-    if (
-      String(user.referred_by) ===
-      String(user.telegram_id)
-    ) {
-      return 0;
-    }
-
-    const changed =
-      await db.execute({
-
-        sql: `
-          UPDATE users
-          SET referral_rewarded = 1
-          WHERE telegram_id = ?
-            AND referred_by IS NOT NULL
-            AND referred_by != ?
-            AND wallet_address IS NOT NULL
-            AND wallet_address != ''
-            AND referral_rewarded = 0
-        `,
-
-        args: [
-          String(telegramId),
-          String(telegramId)
-        ]
-      });
-
-    if (
-      Number(
-        changed.rowsAffected || 0
-      ) !== 1
-    ) {
-      return 0;
-    }
-
-    const referrer =
-      await getUser(
-        user.referred_by
-      );
-
-    if (!referrer) {
-
-      await db.execute({
-
-        sql: `
-          UPDATE users
-          SET referral_rewarded = 0
-          WHERE telegram_id = ?
-        `,
-
-        args: [
-          String(telegramId)
-        ]
-      });
-
-      return 0;
-    }
-
-    await db.execute({
-
-      sql: `
-        UPDATE users
-        SET balance = balance + ?
-        WHERE telegram_id = ?
-      `,
-
+    await tx.execute({
+      sql: `INSERT INTO transactions
+            (telegram_id, type, amount, status, details, created_at)
+            VALUES (?, 'REFERRAL', ?, 'Completed', ?, ?)`,
       args: [
+        String(user.referred_by),
         REFERRAL_JOIN_REWARD,
-        String(referrer.telegram_id)
+        `Referral reward for user ${String(telegramId)} connecting TON wallet`,
+        now()
       ]
     });
 
-    await addTransaction(
+    // Exactly one bonus spin ticket per referred user after wallet qualification.
+    await tx.execute({
+      sql: `INSERT OR IGNORE INTO spin_tickets (owner_telegram_id, invited_telegram_id, created_at) VALUES (?, ?, ?)`,
+      args: [String(user.referred_by), String(telegramId), now()]
+    });
 
-      referrer.telegram_id,
-
-      "REFERRAL",
-
-      REFERRAL_JOIN_REWARD,
-
-      "Completed",
-
-      `Referral reward for user ${String(telegramId)} connecting TON wallet`
-    );
-
-    console.log(
-      `Referral qualified: ${telegramId} -> ${referrer.telegram_id} (+${REFERRAL_JOIN_REWARD} SNP)`
-    );
-
+    await tx.commit();
+    console.log(`Referral qualified: ${telegramId} -> ${user.referred_by} (+${REFERRAL_JOIN_REWARD} SNP)`);
     return REFERRAL_JOIN_REWARD;
-
   } catch (error) {
-
-    console.error(
-      "qualifyReferral error:",
-      error
-    );
-
+    try { if (tx) await tx.rollback(); } catch (_) {}
+    console.error("qualifyReferral error:", error);
     return 0;
   }
 }
-
 
 async function rewardUser(
   telegramId,
@@ -1192,7 +1138,9 @@ async function initDB() {
 
       recharge_level INTEGER DEFAULT 1,
 
-      referral_rewarded INTEGER DEFAULT 0
+      referral_rewarded INTEGER DEFAULT 0,
+
+      referral_mining_remainder REAL DEFAULT 0
 
     )
 
@@ -1217,7 +1165,8 @@ async function initDB() {
     ["energy_boost_level", "INTEGER DEFAULT 1"],
     ["recharge_multiplier", "INTEGER DEFAULT 1"],
     ["recharge_level", "INTEGER DEFAULT 1"],
-    ["referral_rewarded", "INTEGER DEFAULT 0"]
+    ["referral_rewarded", "INTEGER DEFAULT 0"],
+    ["referral_mining_remainder", "REAL DEFAULT 0"]
 
   ];
 
@@ -1302,6 +1251,29 @@ async function initDB() {
 
   `);
 
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS spin_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT NOT NULL,
+      day_key TEXT NOT NULL,
+      reward INTEGER NOT NULL,
+      prize_index INTEGER NOT NULL,
+      created_at TEXT,
+      UNIQUE(telegram_id, day_key)
+    )
+  `);
+
+  // New spin ledger: rolling 24-hour free spins, referral tickets and lifetime spin count.
+  await db.execute(`CREATE TABLE IF NOT EXISTS spin_free_claims (
+    telegram_id TEXT PRIMARY KEY, claimed_at TEXT NOT NULL
+  )`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS spin_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, owner_telegram_id TEXT NOT NULL, invited_telegram_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, used_at TEXT
+  )`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS spin_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT NOT NULL, spin_number INTEGER NOT NULL, ticket_id INTEGER, spin_kind TEXT NOT NULL, prize_type TEXT NOT NULL, reward REAL NOT NULL DEFAULT 0, prize_index INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(telegram_id, spin_number)
+  )`);
 
   await db.execute(`
 
@@ -1799,37 +1771,38 @@ app.post(
       } else {
 
         await db.execute({
-
-          sql: `
-            UPDATE users
-            SET username = ?
-            WHERE telegram_id = ?
-          `,
-
-          args: [
-            username,
-            telegramId
-          ]
-
+          sql: `UPDATE users SET username = ? WHERE telegram_id = ?`,
+          args: [username, telegramId]
         });
 
+        // A user may first open the app normally and only later follow an
+        // invite link. Attach the inviter once, but never overwrite an existing one.
+        if (startParam && !user.referred_by) {
+          const ref = await db.execute({
+            sql: `SELECT telegram_id FROM users WHERE referral_code = ? LIMIT 1`,
+            args: [startParam]
+          });
+          const inviterId = ref.rows[0]?.telegram_id ? String(ref.rows[0].telegram_id) : "";
+          if (inviterId && inviterId !== telegramId) {
+            await db.execute({
+              sql: `UPDATE users SET referred_by = ?
+                    WHERE telegram_id = ? AND (referred_by IS NULL OR referred_by = '')`,
+              args: [inviterId, telegramId]
+            });
+          }
+        }
       }
 
-
-      user =
-        await syncEnergy(
-          telegramId
-        );
-
+      user = await syncEnergy(telegramId);
+      // If this existing user already has a wallet, a newly attached referral
+      // should qualify immediately. The atomic helper makes this exactly-once.
+      const referralReward = await qualifyReferral(telegramId);
+      user = await getUser(telegramId);
 
       res.json({
-
-        ok:
-          true,
-
-        user:
-          publicUser(user)
-
+        ok: true,
+        referral_reward: referralReward,
+        user: publicUser(user)
       });
 
     } catch (error) {
@@ -1933,58 +1906,72 @@ app.post(
         usable *
         tapPower;
 
-      const result =
-        await db.execute({
-
-          sql: `
-            UPDATE users
-            SET
-              balance = balance + ?,
-              energy = energy - ?,
-              last_energy_update = ?
-            WHERE telegram_id = ?
-              AND energy >= ?
-          `,
-
-          args: [
-            reward,
-            usable,
-            now(),
-            telegramId,
-            usable
-          ]
+      // Mine and credit the inviter's 15% commission in one DB transaction.
+      // A failed commission write rolls back the tap too, preventing lost or duplicate rewards.
+      let tx;
+      let referralCommission = 0;
+      try {
+        tx = await db.transaction("write");
+        const mineResult = await tx.execute({
+          sql: `UPDATE users
+                SET balance = balance + ?, energy = energy - ?, last_energy_update = ?
+                WHERE telegram_id = ? AND energy >= ?`,
+          args: [reward, usable, now(), String(telegramId), usable]
         });
+        if (Number(mineResult.rowsAffected || 0) !== 1) {
+          throw new Error("Tap conflict. Try again.");
+        }
 
-
-      if (!result.rowsAffected) {
-
-        return res.status(409)
-          .json({
-            error:
-              "Tap conflict. Try again."
+        const referralResult = await tx.execute({
+          sql: `SELECT referred_by, wallet_address, referral_rewarded, referral_mining_remainder
+                FROM users WHERE telegram_id = ? LIMIT 1`,
+          args: [String(telegramId)]
+        });
+        const referralUser = referralResult.rows[0];
+        const inviterId = referralUser?.referred_by ? String(referralUser.referred_by) : "";
+        if (referralUser?.wallet_address &&
+            Number(referralUser.referral_rewarded || 0) === 1 &&
+            inviterId && inviterId !== String(telegramId)) {
+          // Preserve fractional SNP across small tap batches so 15% does not round to zero forever.
+          const accrued = Number(referralUser.referral_mining_remainder || 0) + reward * REFERRAL_RATE;
+          referralCommission = Math.floor(accrued + 1e-9);
+          const remainder = Math.max(0, accrued - referralCommission);
+          await tx.execute({
+            sql: `UPDATE users SET referral_mining_remainder = ? WHERE telegram_id = ?`,
+            args: [remainder, String(telegramId)]
           });
+          if (referralCommission > 0) {
+            const inviterUpdate = await tx.execute({
+              sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`,
+              args: [referralCommission, inviterId]
+            });
+            if (Number(inviterUpdate.rowsAffected || 0) !== 1) {
+              throw new Error("Referral commission could not be credited");
+            }
+            await tx.execute({
+              sql: `INSERT INTO transactions
+                    (telegram_id, type, amount, status, details, created_at)
+                    VALUES (?, 'REFERRAL', ?, 'Completed', ?, ?)`,
+              args: [inviterId, referralCommission, `15% mining commission from referral ${String(telegramId)}`, now()]
+            });
+          }
+        }
+        await tx.commit();
+      } catch (tapError) {
+        try { if (tx) await tx.rollback(); } catch (_) {}
+        if (String(tapError.message || "").toLowerCase().includes("tap conflict")) {
+          return res.status(409).json({ error: "Tap conflict. Try again." });
+        }
+        throw tapError;
       }
 
-
-      const updated =
-        await getUser(
-          telegramId
-        );
-
-
+      const updated = await getUser(telegramId);
       res.json({
-
-        ok:
-          true,
-
-        taps:
-          usable,
-
+        ok: true,
+        taps: usable,
         reward,
-
-        user:
-          publicUser(updated)
-
+        referral_commission: referralCommission,
+        user: publicUser(updated)
       });
 
     } catch (error) {
@@ -3283,6 +3270,85 @@ async function getTaskStatus(
 
 
 // ============================================================
+// DAILY SPIN — one free spin every rolling 24 hours + referral tickets
+// ============================================================
+app.get("/api/spin/status", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const id = String(verified.id);
+    const freeResult = await db.execute({ sql: `SELECT claimed_at FROM spin_free_claims WHERE telegram_id = ? LIMIT 1`, args: [id] });
+    const lastFree = freeResult.rows[0]?.claimed_at ? new Date(freeResult.rows[0].claimed_at).getTime() : 0;
+    const nowMs = Date.now();
+    const freeReady = !lastFree || !Number.isFinite(lastFree) || nowMs - lastFree >= 24 * 60 * 60 * 1000;
+    const ticketsResult = await db.execute({ sql: `SELECT COUNT(*) AS n FROM spin_tickets WHERE owner_telegram_id = ? AND used_at IS NULL`, args: [id] });
+    const countResult = await db.execute({ sql: `SELECT COUNT(*) AS n FROM spin_history WHERE telegram_id = ?`, args: [id] });
+    const pendingTon = await db.execute({ sql: `SELECT COUNT(*) AS n FROM spin_history WHERE telegram_id = ? AND prize_type = 'TON' AND reward > 0`, args: [id] });
+    res.json({ ok: true, free_ready: freeReady, next_free_at: freeReady ? null : new Date(lastFree + 86400000).toISOString(), tickets: Number(ticketsResult.rows[0]?.n || 0), spin_count: Number(countResult.rows[0]?.n || 0), ton_wins: Number(pendingTon.rows[0]?.n || 0) });
+  } catch (error) {
+    console.error("/api/spin/status", error);
+    res.status(500).json({ error: "Spin status unavailable" });
+  }
+});
+
+app.post("/api/spin/claim", async (req, res) => {
+  let tx;
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const id = String(verified.id);
+    const stamp = now();
+    tx = await db.transaction("write");
+    const freeResult = await tx.execute({ sql: `SELECT claimed_at FROM spin_free_claims WHERE telegram_id = ? LIMIT 1`, args: [id] });
+    const lastFree = freeResult.rows[0]?.claimed_at ? new Date(freeResult.rows[0].claimed_at).getTime() : 0;
+    const freeReady = !lastFree || !Number.isFinite(lastFree) || Date.now() - lastFree >= 86400000;
+    let ticket = null;
+    let spinKind = "free";
+    if (!freeReady) {
+      const ticketResult = await tx.execute({ sql: `SELECT id FROM spin_tickets WHERE owner_telegram_id = ? AND used_at IS NULL ORDER BY id LIMIT 1`, args: [id] });
+      ticket = ticketResult.rows[0] || null;
+      if (!ticket) { await tx.rollback(); tx = null; return res.status(409).json({ error: "Free spin is available every 24 hours. Invite a new friend who opens the mini app and connects a TON wallet to earn an extra ticket.", free_ready: false }); }
+      spinKind = "ticket";
+      const used = await tx.execute({ sql: `UPDATE spin_tickets SET used_at = ? WHERE id = ? AND used_at IS NULL`, args: [stamp, Number(ticket.id)] });
+      if (Number(used.rowsAffected || 0) !== 1) throw new Error("Spin ticket already used");
+    } else {
+      await tx.execute({ sql: `INSERT INTO spin_free_claims (telegram_id, claimed_at) VALUES (?, ?) ON CONFLICT(telegram_id) DO UPDATE SET claimed_at = excluded.claimed_at`, args: [id, stamp] });
+    }
+    const countResult = await tx.execute({ sql: `SELECT COUNT(*) AS n FROM spin_history WHERE telegram_id = ?`, args: [id] });
+    const spinNumber = Number(countResult.rows[0]?.n || 0) + 1;
+    // TON jackpot is exactly 1% from the 10th spin onward. It is recorded as a payout due, not silently added to SNP balance.
+    let prizeType = "NONE", reward = 0, prizeIndex = 6;
+    const jackpot = spinNumber >= 10 && crypto.randomInt(100) === 0;
+    if (jackpot) { prizeType = "TON"; reward = 0.1; prizeIndex = 7; }
+    else {
+      // Eight equal wheel slots: six SNP rewards and two no-prize slots; jackpot roll is separate from the wheel.
+      const slot = crypto.randomInt(8);
+      prizeIndex = slot;
+      const rewards = [10, 25, 50, 100, 250, 500, 0, 0];
+      reward = rewards[slot];
+      prizeType = reward > 0 ? "SNP" : "NONE";
+    }
+    await tx.execute({ sql: `INSERT INTO spin_history (telegram_id, spin_number, ticket_id, spin_kind, prize_type, reward, prize_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, args: [id, spinNumber, ticket ? Number(ticket.id) : null, spinKind, prizeType, reward, prizeIndex, stamp] });
+    if (prizeType === "SNP" && reward > 0) {
+      const credited = await tx.execute({ sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`, args: [reward, id] });
+      if (Number(credited.rowsAffected || 0) !== 1) throw new Error("Could not credit spin reward");
+      await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'SPIN', ?, 'Completed', ?, ?)`, args: [id, reward, `Spin #${spinNumber} ${spinKind} reward`, stamp] });
+    } else if (prizeType === "TON") {
+      await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'SPIN_TON', 0, 'Pending', ?, ?)`, args: [`${id}`, `0.1 TON jackpot won on spin #${spinNumber}; payout pending manual/treasury processing`, stamp] });
+    } else {
+      await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'SPIN', 0, 'Completed', ?, ?)`, args: [id, `No prize on spin #${spinNumber}`, stamp] });
+    }
+    await tx.commit(); tx = null;
+    const user = await getUser(id);
+    res.json({ ok: true, reward, prize_type: prizeType, prize_index: prizeIndex, spin_number: spinNumber, spin_kind: spinKind, tickets_used: spinKind === "ticket", free_ready: false, user: publicUser(user) });
+  } catch (error) {
+    try { if (tx) await tx.rollback(); } catch (_) {}
+    console.error("/api/spin/claim", error);
+    res.status(500).json({ error: "Spin could not be completed" });
+  }
+});
+
+// ============================================================
 // GET TASKS
 // ============================================================
 
@@ -3664,12 +3730,9 @@ app.post(
         "wallet"
       ) {
 
-        const wallet =
-          requestedWallet ||
-          String(
-            user.wallet_address ||
-            ""
-          ).trim();
+        // Only the wallet saved by /api/wallet/connect is trusted.
+        // A request body cannot claim ownership of an arbitrary wallet.
+        const wallet = String(user.wallet_address || "").trim();
 
 
         if (!wallet) {
@@ -3700,25 +3763,6 @@ app.post(
         }
 
 
-        if (
-          !user.wallet_address
-        ) {
-
-          await db.execute({
-
-            sql: `
-              UPDATE users
-              SET wallet_address = ?
-              WHERE telegram_id = ?
-            `,
-
-            args: [
-              wallet,
-              telegramId
-            ]
-          });
-
-        }
       }
 
 
@@ -3731,12 +3775,9 @@ app.post(
         "holder"
       ) {
 
-        const wallet =
-          requestedWallet ||
-          String(
-            user.wallet_address ||
-            ""
-          ).trim();
+        // Only the wallet saved by /api/wallet/connect is trusted.
+        // A request body cannot claim ownership of an arbitrary wallet.
+        const wallet = String(user.wallet_address || "").trim();
 
 
         if (!wallet) {
@@ -3847,76 +3888,70 @@ app.post(
 
 
       // --------------------------------------------------------
-      // CLAIM
+      // CLAIM + REWARD (atomic)
       // --------------------------------------------------------
-
+      // Claim row, user balance, ledger and inviter commission are committed
+      // together so a transient DB failure cannot mark a task done without pay.
+      const reward = Math.max(0, safeInt(task.reward, 0));
+      let tx;
       try {
-
-        await db.execute({
-
-          sql: `
-            INSERT INTO task_claims
-            (
-              telegram_id,
-              task_id,
-              reward,
-              status,
-              created_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-          `,
-
-          args: [
-            telegramId,
-            task.id,
-            Number(task.reward || 0),
-            "Completed",
-            now()
-          ]
+        tx = await db.transaction("write");
+        await tx.execute({
+          sql: `INSERT INTO task_claims
+                (telegram_id, task_id, reward, status, created_at)
+                VALUES (?, ?, ?, 'Completed', ?)`,
+          args: [telegramId, task.id, reward, now()]
         });
 
-      } catch (insertError) {
-
-        if (
-          String(
-            insertError.message || ""
-          )
-            .toLowerCase()
-            .includes("unique")
-        ) {
-
-          return res.status(400)
-            .json({
-              error:
-                "Task already completed",
-              already_completed:
-                true
-            });
+        const credit = await tx.execute({
+          sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`,
+          args: [reward, telegramId]
+        });
+        if (Number(credit.rowsAffected || 0) !== 1) {
+          throw new Error("Could not credit task reward");
         }
 
-        throw insertError;
+        await tx.execute({
+          sql: `INSERT INTO transactions
+                (telegram_id, type, amount, status, details, created_at)
+                VALUES (?, 'TASK', ?, 'Completed', ?, ?)`,
+          args: [telegramId, reward, task.name || task.id, now()]
+        });
+
+        const referralUserResult = await tx.execute({
+          sql: `SELECT referred_by, wallet_address, referral_rewarded FROM users WHERE telegram_id = ? LIMIT 1`,
+          args: [telegramId]
+        });
+        const referralUser = referralUserResult.rows[0];
+        const inviterId = referralUser?.referred_by ? String(referralUser.referred_by) : "";
+        const commission = referralUser?.wallet_address && Number(referralUser.referral_rewarded || 0) === 1 && inviterId && inviterId !== telegramId
+          ? Math.floor(reward * REFERRAL_RATE)
+          : 0;
+
+        if (commission > 0) {
+          const inviterCredit = await tx.execute({
+            sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`,
+            args: [commission, inviterId]
+          });
+          if (Number(inviterCredit.rowsAffected || 0) === 1) {
+            await tx.execute({
+              sql: `INSERT INTO transactions
+                    (telegram_id, type, amount, status, details, created_at)
+                    VALUES (?, 'REFERRAL', ?, 'Completed', ?, ?)`,
+              args: [inviterId, commission, `${task.name || task.id} referral bonus`, now()]
+            });
+          }
+        }
+        await tx.commit();
+      } catch (claimError) {
+        try { if (tx) await tx.rollback(); } catch (_) {}
+        if (String(claimError.message || "").toLowerCase().includes("unique")) {
+          return res.status(400).json({ error: "Task already completed", already_completed: true });
+        }
+        throw claimError;
       }
 
-
-      await rewardUser(
-
-        telegramId,
-
-        Number(
-          task.reward || 0
-        ),
-
-        "TASK",
-
-        task.name
-
-      );
-
-
-      const fresh =
-        await getUser(
-          telegramId
-        );
+      const fresh = await getUser(telegramId);
 
 
       res.json({
@@ -4156,32 +4191,17 @@ app.get(
       }
 
 
-      const result =
-        await db.execute({
-
-          sql: `
-            SELECT *
-            FROM transactions
-            WHERE telegram_id = ?
-            ORDER BY id DESC
-            LIMIT 100
-          `,
-
-          args: [
-            verified.id
-          ]
-        });
-
-
-      res.json({
-
-        ok:
-          true,
-
-        history:
-          result.rows
-
+      const rawLimit = Number.parseInt(String(req.query.limit || "10"), 10);
+      const rawOffset = Number.parseInt(String(req.query.offset || "0"), 10);
+      const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(10, rawLimit)) : 10;
+      const offset = Number.isFinite(rawOffset) ? Math.max(0, rawOffset) : 0;
+      const result = await db.execute({
+        sql: `SELECT * FROM transactions WHERE telegram_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+        args: [String(verified.id), limit + 1, offset]
       });
+      const rows = result.rows || [];
+      const hasMore = rows.length > limit;
+      res.json({ ok: true, history: rows.slice(0, limit), has_more: hasMore, next_offset: offset + Math.min(rows.length, limit) });
 
     } catch (error) {
 
@@ -5102,32 +5122,14 @@ app.post(
       }
 
 
-      if (
-        user.wallet_address
-      ) {
+      if (!user.wallet_address) {
+        return res.status(400).json({ error: "Connect your TON wallet first" });
+      }
 
-        const saved =
-          normalizeAddress(
-            user.wallet_address
-          );
-
-        const requested =
-          normalizeAddress(
-            normalizedWallet
-          );
-
-
-        if (
-          saved !==
-          requested
-        ) {
-
-          return res.status(400)
-            .json({
-              error:
-                "Wallet does not match your connected wallet"
-            });
-        }
+      const saved = normalizeAddress(user.wallet_address);
+      const requested = normalizeAddress(normalizedWallet);
+      if (saved !== requested) {
+        return res.status(400).json({ error: "Wallet does not match your connected wallet" });
       }
 
 
