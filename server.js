@@ -921,8 +921,6 @@ async function rewardReferralOwner(
 
 
 async function qualifyReferral(telegramId) {
-  // The flag, inviter balance and ledger row must commit together.
-  // Otherwise a transient database error can consume the flag without paying.
   let tx;
   try {
     tx = await db.transaction("write");
@@ -980,14 +978,12 @@ async function qualifyReferral(telegramId) {
       ]
     });
 
-    // Exactly one bonus spin ticket per referred user after wallet qualification.
     await tx.execute({
       sql: `INSERT OR IGNORE INTO spin_tickets (owner_telegram_id, invited_telegram_id, created_at) VALUES (?, ?, ?)`,
       args: [String(user.referred_by), String(telegramId), now()]
     });
 
     await tx.commit();
-    console.log(`Referral qualified: ${telegramId} -> ${user.referred_by} (+${REFERRAL_JOIN_REWARD} SNP)`);
     return REFERRAL_JOIN_REWARD;
   } catch (error) {
     try { if (tx) await tx.rollback(); } catch (_) {}
@@ -1096,11 +1092,6 @@ async function initDB() {
   console.log(
     "Initializing SINAPS database..."
   );
-
-
- // ============================================================
-// ADVERTISING TASKS TABLES
-// ============================================================
 
 await db.execute(`
   CREATE TABLE IF NOT EXISTS ad_tasks (
@@ -1272,7 +1263,6 @@ await db.execute(`
     )
   `);
 
-  // New spin ledger: rolling 24-hour free spins, referral tickets and lifetime spin count.
   await db.execute(`CREATE TABLE IF NOT EXISTS spin_free_claims (
     telegram_id TEXT PRIMARY KEY, claimed_at TEXT NOT NULL
   )`);
@@ -1505,49 +1495,55 @@ await db.execute(`
 
 
 // ============================================================
-// TELEGRAM API
+// TELEGRAM API (WITH SAFE TIMEOUT & ABORT CONTROLLER)
 // ============================================================
 
 async function telegramApi(
   method,
   body
 ) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
 
-  const response =
-    await fetch(
-      `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
-      {
-        method: "POST",
+    const response =
+      await fetch(
+        `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
+        {
+          method: "POST",
 
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
+          headers: {
+            "Content-Type":
+              "application/json"
+          },
 
-        body:
-          JSON.stringify(body)
-      }
-    );
+          body:
+            JSON.stringify(body),
 
-  const data =
-    await response
-      .json()
-      .catch(
-        () => ({})
-      );
+          signal: controller.signal
+        }
+      ).finally(() => clearTimeout(timeout));
 
-  if (
-    !response.ok ||
-    !data.ok
-  ) {
+    const data =
+      await response
+        .json()
+        .catch(
+          () => ({})
+        );
 
-    throw new Error(
-      data.description ||
-      `Telegram ${method} failed`
-    );
+    if (
+      !response.ok ||
+      !data.ok
+    ) {
+      console.error(`Telegram API error on ${method}:`, data.description || response.statusText);
+      return null;
+    }
+
+    return data.result;
+  } catch (error) {
+    console.error(`Telegram API fetch failed for ${method}:`, error.message);
+    return null;
   }
-
-  return data.result;
 }
 
 
@@ -1555,38 +1551,44 @@ async function isTelegramMember(
   chat,
   telegramId
 ) {
+  try {
+    const member =
+      await telegramApi(
+        "getChatMember",
+        {
+          chat_id:
+            chat,
 
-  const member =
-    await telegramApi(
-      "getChatMember",
-      {
-        chat_id:
-          chat,
+          user_id:
+            telegramId
+        }
+      );
 
-        user_id:
-          telegramId
-      }
+    if (!member) return false;
+
+    return (
+
+      [
+        "creator",
+        "administrator",
+        "member"
+      ].includes(
+        member.status
+      )
+
+      ||
+
+      (
+        member.status ===
+        "restricted" &&
+        member.is_member === true
+      )
+
     );
-
-  return (
-
-    [
-      "creator",
-      "administrator",
-      "member"
-    ].includes(
-      member.status
-    )
-
-    ||
-
-    (
-      member.status ===
-      "restricted" &&
-      member.is_member === true
-    )
-
-  );
+  } catch (e) {
+    console.error("isTelegramMember error:", e.message);
+    return false;
+  }
 }
 
 
@@ -1797,8 +1799,6 @@ app.post(
           args: [username, telegramId]
         });
 
-        // A user may first open the app normally and only later follow an
-        // invite link. Attach the inviter once, but never overwrite an existing one.
         if (startParam && !user.referred_by) {
           const ref = await db.execute({
             sql: `SELECT telegram_id FROM users WHERE referral_code = ? LIMIT 1`,
@@ -1816,8 +1816,6 @@ app.post(
       }
 
       user = await syncEnergy(telegramId);
-      // If this existing user already has a wallet, a newly attached referral
-      // should qualify immediately. The atomic helper makes this exactly-once.
       const referralReward = await qualifyReferral(telegramId);
       user = await getUser(telegramId);
 
@@ -1861,8 +1859,6 @@ app.post(
 
       const telegramId = String(verified.id);
 
-      // Backward compatibility with the older app.js.
-      // The updated app.js will send a stable request_id.
       const requestId = String(
         req.body.request_id ||
         `legacy-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`
@@ -1883,7 +1879,6 @@ app.post(
 
       tx = await db.transaction("write");
 
-      // Reserve this request ID in the same transaction as the reward.
       const inserted = await tx.execute({
         sql: `
           INSERT OR IGNORE INTO tap_requests
@@ -1924,7 +1919,6 @@ app.post(
         });
       }
 
-      // Read the current energy and tap power inside the write transaction.
       const result = await tx.execute({
         sql: `
           SELECT energy, tap_power, referred_by, wallet_address,
@@ -1978,7 +1972,6 @@ app.post(
         throw new Error("Tap conflict. Try again.");
       }
 
-      // Preserve the existing 15% referral mining commission.
       let referralCommission = 0;
 
       const inviterId = user.referred_by
@@ -2043,7 +2036,6 @@ app.post(
         }
       }
 
-      // The request ID and all balance changes commit together.
       await tx.commit();
       tx = null;
 
@@ -3294,10 +3286,6 @@ async function getTaskStatus(
         );
 
 
-      // --------------------------------------------------------
-      // REFERRAL TASKS MUST USE REAL REFERRAL COUNT
-      // --------------------------------------------------------
-
       if (
         task.type ===
         "referral"
@@ -3313,18 +3301,8 @@ async function getTaskStatus(
           referralCount >=
           required;
 
-        /*
-         * Extra protection:
-         * Even if an old/bad database record says
-         * this task was claimed, it cannot show DONE
-         * until the actual number of referrals is enough.
-         */
       }
 
-
-      // --------------------------------------------------------
-      // WALLET TASK
-      // --------------------------------------------------------
 
       if (
         task.type ===
@@ -3385,7 +3363,6 @@ async function submitSpinTonPayout(spinHistoryId) {
     return { ...payout, status: "wallet_required" };
   }
 
-  // Validate wallet and treasury configuration before reserving the one-time send.
   const destination = Address.parse(walletText);
   await initTreasuryPayout();
   const queryId = crypto.randomBytes(8).readBigUInt64BE(0).toString();
@@ -3420,10 +3397,8 @@ async function submitSpinTonPayout(spinHistoryId) {
       sql: `UPDATE transactions SET status = 'Submitted', details = ? WHERE telegram_id = ? AND type = 'SPIN_TON' AND details LIKE ?`,
       args: [`0.1 TON payout submitted to ${destination.toString()}; correlation ${comment}; blockchain confirmation pending`, String(payout.telegram_id), `%spin #${payout.spin_number};%`]
     });
-    console.log("SPIN TON PAYOUT SUBMITTED", { spinHistoryId, telegramId: String(payout.telegram_id), destination: destination.toString(), queryId, seqno });
     return { ...payout, status: "submitted", payout_query_id: queryId, wallet_address: destination.toString(), submitted_at: stamp };
   } catch (error) {
-    // Never automatically retry an uncertain send: it may already have reached the network.
     const message = String(error?.message || error).slice(0, 500);
     await db.execute({
       sql: `UPDATE spin_ton_payouts SET status = 'review_required', error_message = ? WHERE spin_history_id = ? AND status = 'submitting'`,
@@ -3433,13 +3408,12 @@ async function submitSpinTonPayout(spinHistoryId) {
       sql: `UPDATE transactions SET status = 'Review Required', details = ? WHERE telegram_id = ? AND type = 'SPIN_TON' AND details LIKE ?`,
       args: [`0.1 TON payout send outcome needs manual verification; no automatic retry. Error: ${message}`, String(payout.telegram_id), `%spin #${payout.spin_number};%`]
     });
-    console.error("SPIN TON PAYOUT REQUIRES REVIEW", { spinHistoryId, message });
     return { ...payout, status: "review_required", error_message: message };
   }
 }
 
 // ============================================================
-// DAILY SPIN — one free spin every rolling 24 hours + referral tickets
+// DAILY SPIN
 // ============================================================
 app.get("/api/spin/status", async (req, res) => {
   try {
@@ -3485,8 +3459,6 @@ app.post("/api/spin/claim", async (req, res) => {
     }
     const countResult = await tx.execute({ sql: `SELECT COUNT(*) AS n FROM spin_history WHERE telegram_id = ?`, args: [id] });
     const spinNumber = Number(countResult.rows[0]?.n || 0) + 1;
-    // Nine visible sectors: six SNP prizes, one gold TON sector, and two no-prize sectors.
-    // The 0.1 TON jackpot is a separate 1% roll from lifetime spin #10 onward.
     let prizeType = "NONE", reward = 0, prizeIndex = 7;
     const jackpot = spinNumber >= 10 && crypto.randomInt(100) === 0;
     if (jackpot) {
@@ -3494,7 +3466,6 @@ app.post("/api/spin/claim", async (req, res) => {
       reward = 0.1;
       prizeIndex = 6;
     } else {
-      // Keep the TON sector out of the ordinary random selection.
       const normalSlots = [0, 1, 2, 3, 4, 5, 7, 8];
       prizeIndex = normalSlots[crypto.randomInt(normalSlots.length)];
       const rewards = { 0: 10, 1: 25, 2: 50, 3: 100, 4: 250, 5: 500, 7: 0, 8: 0 };
@@ -3521,7 +3492,6 @@ app.post("/api/spin/claim", async (req, res) => {
       try {
         tonPayout = await submitSpinTonPayout(spinHistoryId);
       } catch (payoutError) {
-        console.error("Spin saved but TON payout did not submit", payoutError);
         tonPayout = { status: "pending" };
       }
     }
@@ -3534,7 +3504,6 @@ app.post("/api/spin/claim", async (req, res) => {
   }
 });
 
-// Ask the server to submit a previously won TON prize after a wallet was connected.
 app.post("/api/spin/ton-payout/claim", async (req, res) => {
   try {
     const verified = requireAuth(req, res);
@@ -3556,6 +3525,7 @@ app.post("/api/spin/ton-payout/claim", async (req, res) => {
     return res.status(500).json({ error: "TON prize payout could not be submitted." });
   }
 });
+
 
 // ============================================================
 // GET TASKS
@@ -3612,20 +3582,20 @@ app.get(
     }
   }
 );
+
+
 // ============================================================
 // SINAPS ADVERTISING API
 // ============================================================
 
-const AD_PRICE_PER_CLICK = 0.001; // 100 clicks = 0.1 GRAM
+const AD_PRICE_PER_CLICK = 0.001;
 const AD_MIN_CLICKS = 100;
 const AD_MAX_CLICKS = 100000;
 
-// Calculate advertising cost
 function calculateAdPrice(clicks) {
   return Number((Number(clicks) * AD_PRICE_PER_CLICK).toFixed(6));
 }
 
-// Create advertising task
 app.post("/api/ads/create", async (req, res) => {
   try {
     const verified = requireAuth(req, res);
@@ -3774,7 +3744,6 @@ app.post("/api/ads/create", async (req, res) => {
 });
 
 
-// Get current user's advertising tasks
 app.get("/api/ads/my", async (req, res) => {
   try {
     const verified = requireAuth(req, res);
@@ -3817,7 +3786,6 @@ app.get("/api/ads/my", async (req, res) => {
 });
 
 
-// List publicly approved and paid advertising tasks
 app.get("/api/ads/active", async (req, res) => {
   try {
     const verified = requireAuth(req, res);
@@ -3858,6 +3826,7 @@ app.get("/api/ads/active", async (req, res) => {
     });
   }
 });
+
 
 // ============================================================
 // SNP HOLDER CHECK
@@ -4063,10 +4032,6 @@ app.post(
       }
 
 
-      // --------------------------------------------------------
-      // USER
-      // --------------------------------------------------------
-
       const user =
         await getUser(
           telegramId
@@ -4082,10 +4047,6 @@ app.post(
           });
       }
 
-
-      // --------------------------------------------------------
-      // ALREADY CLAIMED
-      // --------------------------------------------------------
 
       const already =
         await db.execute({
@@ -4122,10 +4083,6 @@ app.post(
       }
 
 
-      // --------------------------------------------------------
-      // REFERRAL TASK
-      // --------------------------------------------------------
-
       if (
         task.type ===
         "referral"
@@ -4141,17 +4098,6 @@ app.post(
           await getReferralCount(
             telegramId
           );
-
-
-        console.log(
-          "REFERRAL TASK CHECK",
-          {
-            telegramId,
-            taskId,
-            required,
-            referralCount
-          }
-        );
 
 
         if (
@@ -4175,17 +4121,11 @@ app.post(
       }
 
 
-      // --------------------------------------------------------
-      // WALLET TASK
-      // --------------------------------------------------------
-
       if (
         task.type ===
         "wallet"
       ) {
 
-        // Only the wallet saved by /api/wallet/connect is trusted.
-        // A request body cannot claim ownership of an arbitrary wallet.
         const wallet = String(user.wallet_address || "").trim();
 
 
@@ -4220,17 +4160,11 @@ app.post(
       }
 
 
-      // --------------------------------------------------------
-      // HOLDER TASK
-      // --------------------------------------------------------
-
       if (
         task.type ===
         "holder"
       ) {
 
-        // Only the wallet saved by /api/wallet/connect is trusted.
-        // A request body cannot claim ownership of an arbitrary wallet.
         const wallet = String(user.wallet_address || "").trim();
 
 
@@ -4264,10 +4198,6 @@ app.post(
         }
       }
 
-
-      // --------------------------------------------------------
-      // TELEGRAM TASK
-      // --------------------------------------------------------
 
       if (
         task.type ===
@@ -4322,10 +4252,6 @@ app.post(
       }
 
 
-      // --------------------------------------------------------
-      // EXTERNAL X TASKS
-      // --------------------------------------------------------
-
       if (
         task.type ===
         "external"
@@ -4341,11 +4267,6 @@ app.post(
       }
 
 
-      // --------------------------------------------------------
-      // CLAIM + REWARD (atomic)
-      // --------------------------------------------------------
-      // Claim row, user balance, ledger and inviter commission are committed
-      // together so a transient DB failure cannot mark a task done without pay.
       const reward = Math.max(0, safeInt(task.reward, 0));
       let tx;
       try {
@@ -4768,17 +4689,6 @@ async function initTreasuryPayout() {
           .toRawString();
 
 
-      console.log(
-        "Treasury expected:",
-        expectedRaw
-      );
-
-      console.log(
-        "Seed W5 address:",
-        seedRaw
-      );
-
-
       if (
         seedRaw !==
         expectedRaw
@@ -4804,17 +4714,6 @@ async function initTreasuryPayout() {
         await master.getWalletAddress(
           expected
         );
-
-
-      console.log(
-        "Treasury SNP Jetton Wallet:",
-        treasuryJettonWallet.toString()
-      );
-
-
-      console.log(
-        "Treasury W5 initialized successfully."
-      );
 
 
       return true;
@@ -5203,18 +5102,6 @@ async function sendSnpPayout(
   );
 
 
-  console.log(
-    "SNP PAYOUT SUBMITTED",
-    {
-      withdrawalId,
-      amount,
-      queryId:
-        queryId.toString(),
-      seqno
-    }
-  );
-
-
   return {
 
     query_id:
@@ -5375,12 +5262,6 @@ async function findPayoutTransaction(
               .toString("hex");
 
 
-          console.log(
-            "REAL SNP PAYOUT TX FOUND:",
-            hash
-          );
-
-
           return {
 
             tx_hash:
@@ -5400,22 +5281,12 @@ async function findPayoutTransaction(
           };
 
         } catch (messageError) {
-
-          console.error(
-            "Payout message parse:",
-            messageError.message
-          );
-
+          // ignore
         }
       }
 
     } catch (error) {
-
-      console.error(
-        "Payout transaction parse:",
-        error.message
-      );
-
+      // ignore
     }
   }
 
@@ -5456,11 +5327,7 @@ async function waitForPayoutTransaction(
       }
 
     } catch (error) {
-
-      console.error(
-        "Waiting for payout tx:",
-        error.message
-      );
+      // ignore
     }
 
 
@@ -5812,10 +5679,6 @@ app.post(
       }
 
 
-      // ========================================================
-      // STEP 1 — VERIFY 0.1 TON
-      // ========================================================
-
       if (
         withdrawal.status ===
         "payment_pending"
@@ -5832,11 +5695,6 @@ app.post(
             );
 
         } catch (error) {
-
-          console.error(
-            "Fee verification:",
-            error
-          );
 
           return res.status(503)
             .json({
@@ -5919,11 +5777,6 @@ app.post(
       }
 
 
-      // ========================================================
-      // STEP 2 — IF PAYOUT ALREADY SUBMITTED
-      // SEARCH REAL HASH — NEVER RESEND
-      // ========================================================
-
       if (
         withdrawal.status ===
         "payout_submitted"
@@ -5989,10 +5842,6 @@ app.post(
       }
 
 
-      // ========================================================
-      // REFRESH
-      // ========================================================
-
       result =
         await db.execute({
 
@@ -6014,10 +5863,6 @@ app.post(
       withdrawal =
         result.rows[0];
 
-
-      // ========================================================
-      // STEP 3 — SEND SNP
-      // ========================================================
 
       if (
         withdrawal.status ===
@@ -6070,20 +5915,6 @@ app.post(
               );
 
 
-            /*
-             * IMPORTANT:
-             *
-             * We DO NOT store query_id as a
-             * transaction hash.
-             *
-             * First the payout is marked
-             * payout_submitted.
-             *
-             * Then we search TON for the
-             * actual transaction containing
-             * this query_id.
-             */
-
             await db.execute({
 
               sql: `
@@ -6110,11 +5941,6 @@ app.post(
               ]
             });
 
-
-            /*
-             * Try immediately to find the real
-             * blockchain transaction hash.
-             */
 
             const realTx =
               await waitForPayoutTransaction(
@@ -6151,27 +5977,9 @@ app.post(
                 ]
               });
 
-
-              console.log(
-                "REAL PAYOUT HASH:",
-                realTx.tx_hash
-              );
-
-            } else {
-
-              console.log(
-                "Payout submitted but real hash not found yet."
-              );
-
             }
 
           } catch (payoutError) {
-
-            console.error(
-              "SNP payout failed:",
-              payoutError
-            );
-
 
             await db.execute({
 
@@ -6192,10 +6000,6 @@ app.post(
         }
       }
 
-
-      // ========================================================
-      // FINAL RESULT
-      // ========================================================
 
       const fresh =
         await db.execute({
@@ -6537,63 +6341,32 @@ Your SINAPS journey starts here.`,
       );
 
     } catch (error) {
-
-      console.error(
-        "Telegram /start error:",
-        error
-      );
+      // ignore
     }
   }
 );
 
 
 // ============================================================
-// TELEGRAM WEBHOOK SETUP
+// TELEGRAM WEBHOOK SETUP (NON-BLOCKING)
 // ============================================================
 
 async function setupTelegramWebhook() {
 
   if (!BOT_TOKEN) {
-
-    console.log(
-      "TELEGRAM_BOT_TOKEN is missing"
-    );
-
     return;
   }
-
 
   const webhookUrl =
     "https://sinaps-backend.onrender.com/telegram/webhook";
 
-
-  try {
-
-    const result =
-      await telegramApi(
-
-        "setWebhook",
-
-        {
-          url:
-            webhookUrl
-        }
-
-      );
-
-
-    console.log(
-      "Telegram webhook:",
-      result
-    );
-
-  } catch (error) {
-
-    console.error(
-      "Telegram webhook setup failed:",
-      error
-    );
-  }
+  telegramApi("setWebhook", { url: webhookUrl })
+    .then(result => {
+      if (result) console.log("Telegram webhook setup success");
+    })
+    .catch(error => {
+      console.error("Telegram webhook setup failed (non-blocking):", error?.message);
+    });
 }
 
 
@@ -6607,8 +6380,7 @@ async function start() {
 
     await initDB();
 
-    await setupTelegramWebhook();
-
+    setupTelegramWebhook();
 
     app.listen(
 
