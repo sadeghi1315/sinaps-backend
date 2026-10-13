@@ -4594,6 +4594,40 @@ app.get(
 );
 
 
+/* ============================================================
+   GET CANCELLABLE WITHDRAWALS
+============================================================ */
+
+app.get("/api/withdrawals/cancellable", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+
+    const result = await db.execute({
+      sql: `
+        SELECT withdrawal_id, amount, status
+        FROM withdrawals
+        WHERE telegram_id = ?
+          AND status = 'payment_pending'
+        LIMIT 20
+      `,
+      args: [String(verified.id)]
+    });
+
+    res.json({
+      ok: true,
+      withdrawals: result.rows || []
+    });
+  } catch (error) {
+    console.error("/api/withdrawals/cancellable", error);
+
+    res.status(500).json({
+      ok: false,
+      error: "Could not load cancellable withdrawals"
+    });
+  }
+});
+
 // ============================================================
 // TREASURY INITIALIZATION
 // ============================================================
