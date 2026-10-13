@@ -1099,6 +1099,14 @@ async function initDB() {
 
 
   await db.execute(`
+  
+    CREATE TABLE IF NOT EXISTS tap_requests (
+    telegram_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (telegram_id, request_id)
+  )
 
     CREATE TABLE IF NOT EXISTS users (
 
@@ -1841,147 +1849,209 @@ app.post(
 // TAP
 // ============================================================
 
+
 app.post(
   "/api/tap",
   async (req, res) => {
+    let tx;
 
     try {
+      const verified = requireAuth(req, res);
+      if (!verified) return;
 
-      const verified =
-        requireAuth(
-          req,
-          res
-        );
+      const telegramId = String(verified.id);
 
-      if (!verified) {
-        return;
+      // Backward compatibility with the older app.js.
+      // The updated app.js will send a stable request_id.
+      const requestId = String(
+        req.body.request_id ||
+        `legacy-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`
+      ).trim();
+
+      if (requestId.length > 120 || !requestId) {
+        return res.status(400).json({
+          error: "Invalid tap request ID"
+        });
       }
 
-      const telegramId =
-        verified.id;
+      const count = Math.min(
+        50,
+        Math.max(1, safeInt(req.body.count, 1))
+      );
 
-      const user =
-        await syncEnergy(
-          telegramId
-        );
+      await syncEnergy(telegramId);
+
+      tx = await db.transaction("write");
+
+      // Reserve this request ID in the same transaction as the reward.
+      const inserted = await tx.execute({
+        sql: `
+          INSERT OR IGNORE INTO tap_requests
+          (telegram_id, request_id, count, created_at)
+          VALUES (?, ?, ?, ?)
+        `,
+        args: [telegramId, requestId, count, now()]
+      });
+
+      if (Number(inserted.rowsAffected || 0) !== 1) {
+        const previous = await tx.execute({
+          sql: `
+            SELECT count FROM tap_requests
+            WHERE telegram_id = ? AND request_id = ?
+            LIMIT 1
+          `,
+          args: [telegramId, requestId]
+        });
+
+        await tx.commit();
+        tx = null;
+
+        if (
+          !previous.rows.length ||
+          Number(previous.rows[0].count) !== count
+        ) {
+          return res.status(409).json({
+            error: "Tap request ID conflict"
+          });
+        }
+
+        const currentUser = await getUser(telegramId);
+
+        return res.json({
+          ok: true,
+          duplicate: true,
+          user: publicUser(currentUser)
+        });
+      }
+
+      // Read the current energy and tap power inside the write transaction.
+      const result = await tx.execute({
+        sql: `
+          SELECT energy, tap_power, referred_by, wallet_address,
+                 referral_rewarded, referral_mining_remainder
+          FROM users
+          WHERE telegram_id = ?
+          LIMIT 1
+        `,
+        args: [telegramId]
+      });
+
+      const user = result.rows[0];
 
       if (!user) {
+        await tx.rollback();
+        tx = null;
 
-        return res.status(404)
-          .json({
-            error:
-              "User not found"
-          });
+        return res.status(404).json({
+          error: "User not found"
+        });
       }
 
-      const count =
-        Math.min(
-          50,
-          Math.max(
-            1,
-            safeInt(
-              req.body.count,
-              1
-            )
-          )
-        );
-
-      const energy =
-        Number(
-          user.energy || 0
-        );
-
-      const tapPower =
-        Number(
-          user.tap_power || 1
-        );
-
-      const usable =
-        Math.min(
-          count,
-          energy
-        );
+      const energy = Math.max(0, Number(user.energy || 0));
+      const tapPower = Math.max(1, Number(user.tap_power || 1));
+      const usable = Math.min(count, energy);
 
       if (usable <= 0) {
+        await tx.rollback();
+        tx = null;
 
-        return res.status(400)
-          .json({
-
-            error:
-              "No energy",
-
-            user:
-              publicUser(user)
-
-          });
+        return res.status(400).json({
+          error: "No energy",
+          user: publicUser(await getUser(telegramId))
+        });
       }
 
-      const reward =
-        usable *
-        tapPower;
+      const reward = usable * tapPower;
 
-      // Mine and credit the inviter's 15% commission in one DB transaction.
-      // A failed commission write rolls back the tap too, preventing lost or duplicate rewards.
-      let tx;
+      const mineResult = await tx.execute({
+        sql: `
+          UPDATE users
+          SET balance = balance + ?,
+              energy = energy - ?,
+              last_energy_update = ?
+          WHERE telegram_id = ? AND energy >= ?
+        `,
+        args: [reward, usable, now(), telegramId, usable]
+      });
+
+      if (Number(mineResult.rowsAffected || 0) !== 1) {
+        throw new Error("Tap conflict. Try again.");
+      }
+
+      // Preserve the existing 15% referral mining commission.
       let referralCommission = 0;
-      try {
-        tx = await db.transaction("write");
-        const mineResult = await tx.execute({
-          sql: `UPDATE users
-                SET balance = balance + ?, energy = energy - ?, last_energy_update = ?
-                WHERE telegram_id = ? AND energy >= ?`,
-          args: [reward, usable, now(), String(telegramId), usable]
-        });
-        if (Number(mineResult.rowsAffected || 0) !== 1) {
-          throw new Error("Tap conflict. Try again.");
-        }
 
-        const referralResult = await tx.execute({
-          sql: `SELECT referred_by, wallet_address, referral_rewarded, referral_mining_remainder
-                FROM users WHERE telegram_id = ? LIMIT 1`,
-          args: [String(telegramId)]
+      const inviterId = user.referred_by
+        ? String(user.referred_by)
+        : "";
+
+      if (
+        user.wallet_address &&
+        Number(user.referral_rewarded || 0) === 1 &&
+        inviterId &&
+        inviterId !== telegramId
+      ) {
+        const accrued =
+          Number(user.referral_mining_remainder || 0) +
+          reward * REFERRAL_RATE;
+
+        referralCommission = Math.floor(accrued + 1e-9);
+
+        const remainder = Math.max(
+          0,
+          accrued - referralCommission
+        );
+
+        await tx.execute({
+          sql: `
+            UPDATE users
+            SET referral_mining_remainder = ?
+            WHERE telegram_id = ?
+          `,
+          args: [remainder, telegramId]
         });
-        const referralUser = referralResult.rows[0];
-        const inviterId = referralUser?.referred_by ? String(referralUser.referred_by) : "";
-        if (referralUser?.wallet_address &&
-            Number(referralUser.referral_rewarded || 0) === 1 &&
-            inviterId && inviterId !== String(telegramId)) {
-          // Preserve fractional SNP across small tap batches so 15% does not round to zero forever.
-          const accrued = Number(referralUser.referral_mining_remainder || 0) + reward * REFERRAL_RATE;
-          referralCommission = Math.floor(accrued + 1e-9);
-          const remainder = Math.max(0, accrued - referralCommission);
-          await tx.execute({
-            sql: `UPDATE users SET referral_mining_remainder = ? WHERE telegram_id = ?`,
-            args: [remainder, String(telegramId)]
+
+        if (referralCommission > 0) {
+          const inviterUpdate = await tx.execute({
+            sql: `
+              UPDATE users
+              SET balance = balance + ?
+              WHERE telegram_id = ?
+            `,
+            args: [referralCommission, inviterId]
           });
-          if (referralCommission > 0) {
-            const inviterUpdate = await tx.execute({
-              sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`,
-              args: [referralCommission, inviterId]
-            });
-            if (Number(inviterUpdate.rowsAffected || 0) !== 1) {
-              throw new Error("Referral commission could not be credited");
-            }
-            await tx.execute({
-              sql: `INSERT INTO transactions
-                    (telegram_id, type, amount, status, details, created_at)
-                    VALUES (?, 'REFERRAL', ?, 'Completed', ?, ?)`,
-              args: [inviterId, referralCommission, `15% mining commission from referral ${String(telegramId)}`, now()]
-            });
+
+          if (Number(inviterUpdate.rowsAffected || 0) !== 1) {
+            throw new Error(
+              "Referral commission could not be credited"
+            );
           }
+
+          await tx.execute({
+            sql: `
+              INSERT INTO transactions
+              (telegram_id, type, amount, status, details, created_at)
+              VALUES (?, 'REFERRAL', ?, 'Completed', ?, ?)
+            `,
+            args: [
+              inviterId,
+              referralCommission,
+              `15% mining commission from referral ${telegramId}`,
+              now()
+            ]
+          });
         }
-        await tx.commit();
-      } catch (tapError) {
-        try { if (tx) await tx.rollback(); } catch (_) {}
-        if (String(tapError.message || "").toLowerCase().includes("tap conflict")) {
-          return res.status(409).json({ error: "Tap conflict. Try again." });
-        }
-        throw tapError;
       }
+
+      // The request ID and all balance changes commit together.
+      await tx.commit();
+      tx = null;
 
       const updated = await getUser(telegramId);
-      res.json({
+
+      return res.json({
         ok: true,
+        duplicate: false,
         taps: usable,
         reward,
         referral_commission: referralCommission,
@@ -1989,21 +2059,32 @@ app.post(
       });
 
     } catch (error) {
+      if (tx) {
+        try {
+          await tx.rollback();
+        } catch (_) {}
+      }
 
-      console.error(
-        "/api/tap",
-        error
-      );
+      console.error("/api/tap", error);
 
-      res.status(500).json({
-        error:
-          "Tap failed"
+      if (
+        String(error.message || "")
+          .toLowerCase()
+          .includes("tap conflict")
+      ) {
+        return res.status(409).json({
+          error: "Tap conflict. Try again."
+        });
+      }
+
+      return res.status(500).json({
+        error: "Tap failed"
       });
     }
   }
 );
 
-
+ 
 // ============================================================
 // BOOST HELPERS
 // ============================================================
