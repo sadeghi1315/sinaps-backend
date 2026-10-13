@@ -1098,40 +1098,60 @@ async function initDB() {
   );
 
 
- 
+ // ============================================================
+// ADVERTISING TASKS TABLES
+// ============================================================
+
 await db.execute(`
-  CREATE TABLE IF NOT EXISTS tap_requests (
+  CREATE TABLE IF NOT EXISTS ad_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    count INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    platform TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    target_clicks INTEGER NOT NULL,
+    valid_clicks INTEGER DEFAULT 0,
+    price_gram REAL NOT NULL,
+    reward_per_user INTEGER DEFAULT 0,
+    budget_snp INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending_payment',
+    payment_tx_hash TEXT,
+    payment_verified INTEGER DEFAULT 0,
+    admin_note TEXT,
     created_at TEXT NOT NULL,
-    PRIMARY KEY (telegram_id, request_id)
+    updated_at TEXT NOT NULL
   )
 `);
 
 await db.execute(`
-  CREATE TABLE IF NOT EXISTS users (
+  CREATE TABLE IF NOT EXISTS ad_task_clicks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id TEXT UNIQUE NOT NULL,
-    username TEXT,
-    balance INTEGER DEFAULT 0,
-    energy INTEGER DEFAULT 1000,
-    max_energy INTEGER DEFAULT 1000,
-    last_energy_update TEXT,
-    created_at TEXT,
-    last_daily_bonus TEXT,
-    daily_streak INTEGER DEFAULT 0,
-    referral_code TEXT UNIQUE,
-    referred_by TEXT,
-    wallet_address TEXT,
-    tap_power INTEGER DEFAULT 1,
-    tap_boost_level INTEGER DEFAULT 1,
-    energy_boost_level INTEGER DEFAULT 1,
-    recharge_multiplier INTEGER DEFAULT 1,
-    recharge_level INTEGER DEFAULT 1,
-    referral_rewarded INTEGER DEFAULT 0,
-    referral_mining_remainder REAL DEFAULT 0
+    task_id INTEGER NOT NULL,
+    telegram_id TEXT NOT NULL,
+    clicked_at TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    review_note TEXT,
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    reward_paid INTEGER DEFAULT 0,
+    UNIQUE (task_id, telegram_id)
   )
+`);
+
+await db.execute(`
+  CREATE INDEX IF NOT EXISTS idx_ad_tasks_status
+  ON ad_tasks(status)
+`);
+
+await db.execute(`
+  CREATE INDEX IF NOT EXISTS idx_ad_tasks_owner
+  ON ad_tasks(telegram_id)
+`);
+
+await db.execute(`
+  CREATE INDEX IF NOT EXISTS idx_ad_task_clicks_task
+  ON ad_task_clicks(task_id)
 `);
 
 
