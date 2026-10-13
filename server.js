@@ -3612,7 +3612,252 @@ app.get(
     }
   }
 );
+// ============================================================
+// SINAPS ADVERTISING API
+// ============================================================
 
+const AD_PRICE_PER_CLICK = 0.001; // 100 clicks = 0.1 GRAM
+const AD_MIN_CLICKS = 100;
+const AD_MAX_CLICKS = 100000;
+
+// Calculate advertising cost
+function calculateAdPrice(clicks) {
+  return Number((Number(clicks) * AD_PRICE_PER_CLICK).toFixed(6));
+}
+
+// Create advertising task
+app.post("/api/ads/create", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+
+    const telegramId = String(verified.id);
+
+    const {
+      title,
+      description,
+      platform,
+      target_url,
+      target_clicks
+    } = req.body || {};
+
+    const cleanTitle = String(title || "").trim();
+    const cleanDescription = String(description || "").trim();
+    const cleanPlatform = String(platform || "").trim().toLowerCase();
+    const cleanUrl = String(target_url || "").trim();
+    const clicks = Number(target_clicks);
+
+    const allowedPlatforms = [
+      "telegram",
+      "website",
+      "youtube",
+      "instagram",
+      "x",
+      "other"
+    ];
+
+    if (
+      cleanTitle.length < 3 ||
+      cleanTitle.length > 100
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "عنوان تبلیغ باید بین ۳ تا ۱۰۰ کاراکتر باشد."
+      });
+    }
+
+    if (cleanDescription.length > 1000) {
+      return res.status(400).json({
+        ok: false,
+        error: "توضیحات تبلیغ بیش از حد طولانی است."
+      });
+    }
+
+    if (!allowedPlatforms.includes(cleanPlatform)) {
+      return res.status(400).json({
+        ok: false,
+        error: "پلتفرم تبلیغ معتبر نیست."
+      });
+    }
+
+    let parsedUrl;
+
+    try {
+      parsedUrl = new URL(cleanUrl);
+    } catch (_) {
+      return res.status(400).json({
+        ok: false,
+        error: "لینک تبلیغ معتبر نیست."
+      });
+    }
+
+    if (
+      !["https:", "http:"].includes(parsedUrl.protocol) ||
+      !parsedUrl.hostname.includes(".") ||
+      parsedUrl.username ||
+      parsedUrl.password
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "لینک باید یک آدرس HTTP یا HTTPS معتبر باشد."
+      });
+    }
+
+    if (
+      !Number.isInteger(clicks) ||
+      clicks < AD_MIN_CLICKS ||
+      clicks > AD_MAX_CLICKS
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: `تعداد کلیک باید بین ${AD_MIN_CLICKS} و ${AD_MAX_CLICKS} باشد.`
+      });
+    }
+
+    const price = calculateAdPrice(clicks);
+    const now = new Date().toISOString();
+
+    const result = await db.execute({
+      sql: `
+        INSERT INTO ad_tasks (
+          telegram_id,
+          title,
+          description,
+          platform,
+          target_url,
+          target_clicks,
+          valid_clicks,
+          price_gram,
+          reward_per_user,
+          budget_snp,
+          status,
+          payment_verified,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0,
+                'pending_payment', 0, ?, ?)
+      `,
+      args: [
+        telegramId,
+        cleanTitle,
+        cleanDescription,
+        cleanPlatform,
+        cleanUrl,
+        clicks,
+        price,
+        now,
+        now
+      ]
+    });
+
+    return res.json({
+      ok: true,
+      message: "تبلیغ ثبت شد؛ منتظر پرداخت و بررسی است.",
+      ad: {
+        id: Number(result.lastInsertRowid),
+        title: cleanTitle,
+        platform: cleanPlatform,
+        target_clicks: clicks,
+        price_gram: price,
+        status: "pending_payment"
+      }
+    });
+  } catch (error) {
+    console.error("/api/ads/create:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "ثبت تبلیغ انجام نشد."
+    });
+  }
+});
+
+
+// Get current user's advertising tasks
+app.get("/api/ads/my", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+
+    const result = await db.execute({
+      sql: `
+        SELECT
+          id,
+          title,
+          description,
+          platform,
+          target_url,
+          target_clicks,
+          valid_clicks,
+          price_gram,
+          status,
+          payment_verified,
+          created_at
+        FROM ad_tasks
+        WHERE telegram_id = ?
+        ORDER BY id DESC
+        LIMIT 100
+      `,
+      args: [String(verified.id)]
+    });
+
+    return res.json({
+      ok: true,
+      ads: result.rows
+    });
+  } catch (error) {
+    console.error("/api/ads/my:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "تبلیغات شما بارگذاری نشد."
+    });
+  }
+});
+
+
+// List publicly approved and paid advertising tasks
+app.get("/api/ads/active", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+
+    const result = await db.execute({
+      sql: `
+        SELECT
+          id,
+          title,
+          description,
+          platform,
+          target_url,
+          target_clicks,
+          valid_clicks,
+          reward_per_user,
+          created_at
+        FROM ad_tasks
+        WHERE status = 'active'
+          AND payment_verified = 1
+          AND valid_clicks < target_clicks
+        ORDER BY id DESC
+        LIMIT 100
+      `,
+      args: []
+    });
+
+    return res.json({
+      ok: true,
+      ads: result.rows
+    });
+  } catch (error) {
+    console.error("/api/ads/active:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "تبلیغات فعال بارگذاری نشد."
+    });
+  }
+});
 
 // ============================================================
 // SNP HOLDER CHECK
