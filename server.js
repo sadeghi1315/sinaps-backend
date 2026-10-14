@@ -3826,7 +3826,261 @@ app.get("/api/ads/active", async (req, res) => {
     });
   }
 });
+// ============================================================
+// VERIFY AD PAYMENT
+// ============================================================
 
+app.post("/api/ads/verify-payment", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+
+    const telegramId = String(verified.id);
+    const adId = Number(req.body?.ad_id);
+
+    if (!Number.isSafeInteger(adId) || adId <= 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid ad ID."
+      });
+    }
+
+    const result = await db.execute({
+      sql: `
+        SELECT *
+        FROM ad_tasks
+        WHERE id = ?
+          AND telegram_id = ?
+        LIMIT 1
+      `,
+      args: [adId, telegramId]
+    });
+
+    const ad = result.rows[0];
+
+    if (!ad) {
+      return res.status(404).json({
+        ok: false,
+        error: "Advertisement not found."
+      });
+    }
+
+    if (
+      Number(ad.payment_verified) === 1 &&
+      ad.status === "active"
+    ) {
+      return res.json({
+        ok: true,
+        message: "Payment has already been verified.",
+        ad
+      });
+    }
+
+    if (ad.status !== "pending_payment") {
+      return res.status(409).json({
+        ok: false,
+        error: "This advertisement is not awaiting payment."
+      });
+    }
+
+    // Payment verification requires the buyer's wallet address.
+    const walletResult = await db.execute({
+      sql: `
+        SELECT wallet_address
+        FROM users
+        WHERE telegram_id = ?
+        LIMIT 1
+      `,
+      args: [telegramId]
+    });
+
+    const buyerWallet = String(
+      walletResult.rows[0]?.wallet_address || ""
+    ).trim();
+
+    if (!buyerWallet) {
+      return res.status(400).json({
+        ok: false,
+        error: "Connect your TON wallet before verifying payment."
+      });
+    }
+
+    const destination = String(TREASURY_WALLET || "").trim();
+
+    if (!destination) {
+      return res.status(500).json({
+        ok: false,
+        error: "Payment destination is not configured."
+      });
+    }
+
+    const headers = TONCENTER_API_KEY
+      ? { "X-API-Key": TONCENTER_API_KEY }
+      : {};
+
+    const treasuryRaw = Address.parse(destination).toRawString();
+    const buyerRaw = Address.parse(buyerWallet).toRawString();
+
+    const expectedNano = BigInt(
+      Math.round(Number(ad.price_gram) * 1_000_000_000)
+    );
+
+    if (expectedNano <= 0n) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid advertisement payment amount."
+      });
+    }
+
+    const url =
+      `${TONCENTER}/transactions` +
+      `?account=${encodeURIComponent(treasuryRaw)}` +
+      `&limit=100`;
+
+    const response = await fetch(url, { headers });
+
+    if (!response.ok) {
+      return res.status(503).json({
+        ok: false,
+        error: "Unable to check the blockchain right now. Please try again."
+      });
+    }
+
+    const data = await response.json();
+
+    const transactions = Array.isArray(data)
+      ? data
+      : (data.transactions || data.result || []);
+
+    if (!Array.isArray(transactions)) {
+      return res.status(503).json({
+        ok: false,
+        error: "Unexpected blockchain response. Please try again."
+      });
+    }
+
+    let matchedTx = null;
+
+    for (const tx of transactions) {
+      try {
+        const inMsg =
+          tx.in_msg ||
+          tx.inMessage ||
+          tx.in_message ||
+          null;
+
+        if (!inMsg) continue;
+
+        const value = BigInt(
+          String(
+            inMsg.value ??
+            inMsg.amount ??
+            inMsg.coins ??
+            "0"
+          )
+        );
+
+        if (value !== expectedNano) continue;
+
+        const sender = String(
+          inMsg.source ||
+          inMsg.src ||
+          inMsg.sender ||
+          ""
+        ).trim();
+
+        if (!sender) continue;
+
+        if (Address.parse(sender).toRawString() !== buyerRaw) {
+          continue;
+        }
+
+        const txHash = String(
+          tx.hash ||
+          tx.transaction_hash ||
+          tx.tx_hash ||
+          tx.id ||
+          ""
+        );
+
+        if (!txHash) continue;
+
+        matchedTx = {
+          hash: txHash,
+          value: value.toString()
+        };
+
+        break;
+      } catch (_) {
+        // Ignore transactions that cannot be parsed.
+      }
+    }
+
+    if (!matchedTx) {
+      return res.status(400).json({
+        ok: false,
+        error: "Payment has not been found yet. Please wait and try again.",
+        status: "pending_payment"
+      });
+    }
+
+    // Store verified payment and activate the ad atomically.
+    const update = await db.execute({
+      sql: `
+        UPDATE ad_tasks
+        SET
+          payment_verified = 1,
+          status = 'active',
+          updated_at = ?
+        WHERE id = ?
+          AND telegram_id = ?
+          AND status = 'pending_payment'
+          AND payment_verified = 0
+      `,
+      args: [now(), adId, telegramId]
+    });
+
+    if (!update.rowsAffected) {
+      const latest = await db.execute({
+        sql: `
+          SELECT id, status, payment_verified
+          FROM ad_tasks
+          WHERE id = ? AND telegram_id = ?
+          LIMIT 1
+        `,
+        args: [adId, telegramId]
+      });
+
+      if (Number(latest.rows[0]?.payment_verified) === 1) {
+        return res.json({
+          ok: true,
+          message: "Payment has already been verified.",
+          ad: latest.rows[0]
+        });
+      }
+
+      return res.status(409).json({
+        ok: false,
+        error: "Advertisement status changed. Please reload and try again."
+      });
+    }
+
+    return res.json({
+      ok: true,
+      message: "Payment verified. Your advertisement is now active.",
+      ad_id: adId,
+      status: "active",
+      transaction_hash: matchedTx.hash
+    });
+  } catch (error) {
+    console.error("/api/ads/verify-payment:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Advertisement payment verification failed."
+    });
+  }
+});
 
 // ============================================================
 // SNP HOLDER CHECK
