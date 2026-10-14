@@ -3813,19 +3813,31 @@ app.get("/api/ads/active", async (req, res) => {
       args: []
     });
 
+    
+    const amountNano = BigInt(
+      Math.round(price * 1_000_000_000)
+    ).toString();
+
     return res.json({
       ok: true,
-      ads: result.rows
+      message: "Your ad has been created and is awaiting payment confirmation.",
+      ad: {
+        id: Number(result.lastInsertRowid),
+        title: cleanTitle,
+        platform: cleanPlatform,
+        target_clicks: clicks,
+        price_gram: price,
+        status: "pending_payment",
+        payment: {
+          currency: "TON",
+          amount_ton: price,
+          amount_nano: amountNano,
+          destination: TREASURY_WALLET,
+          status: "pending_payment"
+        }
+      }
     });
-  } catch (error) {
-    console.error("/api/ads/active:", error);
 
-    return res.status(500).json({
-      ok: false,
-      error: "تبلیغات فعال بارگذاری نشد."
-    });
-  }
-});
 
 
 // ============================================================
