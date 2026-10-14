@@ -5404,11 +5404,16 @@ app.post(
         verified.id;
 
 
-      const amount =
-        safeInt(
-          req.body.amount,
-          0
-        );
+      const requestedAmount = safeInt(
+  req.body.amount,
+  0
+);
+
+// مبلغ واقعی کسر از موجودی
+const amount = requestedAmount;
+
+// مبلغی که به کیف پول پرداخت می‌شود
+const payoutAmount = Math.floor(requestedAmount / 10);
 
 
       const requestedWallet =
@@ -5418,16 +5423,11 @@ app.post(
         ).trim();
 
 
-      if (
-        amount <= 0
-      ) {
-
-        return res.status(400)
-          .json({
-            error:
-              "Invalid withdrawal amount"
-          });
-      }
+      if (amount <= 0 || payoutAmount <= 0) {
+  return res.status(400).json({
+    error: "Invalid withdrawal amount"
+  });
+}
 
 
       const user =
@@ -5535,7 +5535,7 @@ app.post(
               withdrawal_id,
               telegram_id,
               wallet_address,
-              amount,
+              payoutAmount,
               fee_ton,
               fee_nano,
               treasury_wallet,
