@@ -5535,7 +5535,7 @@ const payoutAmount = Math.floor(requestedAmount / 10);
               withdrawal_id,
               telegram_id,
               wallet_address,
-              payoutAmount,
+              amount,
               fee_ton,
               fee_nano,
               treasury_wallet,
@@ -5554,7 +5554,7 @@ const payoutAmount = Math.floor(requestedAmount / 10);
 
             normalizedWallet,
 
-            amount,
+            payoutAmount,
 
             "0.1",
 
