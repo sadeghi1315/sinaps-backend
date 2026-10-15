@@ -3644,6 +3644,47 @@ function calculateAdPrice(clicks) {
   return Number((Number(clicks) * AD_PRICE_PER_CLICK).toFixed(6));
 }
 
+function parsePublicTelegramChat(targetUrl) {
+  let parsed;
+  try { parsed = new URL(String(targetUrl || "")); } catch (_) { return null; }
+  if (!['t.me', 'www.t.me', 'telegram.me', 'www.telegram.me'].includes(parsed.hostname.toLowerCase())) return null;
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (!parts.length || ['joinchat', 'addstickers', 'share', 'proxy', 's'].includes(parts[0].toLowerCase())) return null;
+  const username = parts[0].replace(/^@/, '');
+  if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) return null;
+  return `@${username}`;
+}
+
+async function checkSinapsBotAdmin(platform, targetUrl) {
+  const chat = parsePublicTelegramChat(targetUrl);
+  if (!chat) return { ok: false, error: "Use a public Telegram channel/group link such as https://t.me/yourchannel. Private invite links cannot be verified." };
+  const me = await telegramApi("getMe", {});
+  if (!me || !me.id) return { ok: false, error: "Telegram bot API is unavailable. Try again later." };
+  const chatInfo = await telegramApi("getChat", { chat_id: chat });
+  if (!chatInfo || !chatInfo.id) return { ok: false, error: "Telegram could not find this public channel/group. Check the link and make sure the bot has been added." };
+  const member = await telegramApi("getChatMember", { chat_id: chatInfo.id, user_id: me.id });
+  if (!member || !["administrator", "creator"].includes(String(member.status || "").toLowerCase())) {
+    return { ok: false, error: "SINAPS bot is not an administrator of this channel/group. Add the bot as admin and check again." };
+  }
+  return { ok: true, is_admin: true, chat_id: String(chatInfo.id), title: String(chatInfo.title || chat) };
+}
+
+app.post("/api/ads/check-telegram-admin", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const platform = String(req.body?.platform || "").toLowerCase();
+    if (!["channel", "group", "telegram"].includes(platform)) {
+      return res.json({ ok: true, is_admin: true, not_required: true });
+    }
+    const result = await checkSinapsBotAdmin(platform, req.body?.target_url);
+    return res.status(result.ok ? 200 : 400).json(result);
+  } catch (error) {
+    console.error("/api/ads/check-telegram-admin:", error);
+    return res.status(500).json({ ok: false, is_admin: false, error: "Could not verify Telegram bot administrator status." });
+  }
+});
+
 app.post("/api/ads/create", async (req, res) => {
   try {
     const verified = requireAuth(req, res);
@@ -3696,6 +3737,13 @@ app.post("/api/ads/create", async (req, res) => {
         ok: false,
         error: "پلتفرم تبلیغ معتبر نیست."
       });
+    }
+
+    if (["channel", "group", "telegram"].includes(cleanPlatform)) {
+      const adminCheck = await checkSinapsBotAdmin(cleanPlatform, cleanUrl);
+      if (!adminCheck.ok) {
+        return res.status(400).json({ ok: false, error: adminCheck.error, bot_admin_required: true });
+      }
     }
 
     let parsedUrl;
