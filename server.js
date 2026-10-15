@@ -1101,6 +1101,7 @@ await db.execute(`
     description TEXT,
     platform TEXT NOT NULL,
     target_url TEXT NOT NULL,
+    target_chat TEXT,
     target_clicks INTEGER NOT NULL,
     valid_clicks INTEGER DEFAULT 0,
     price_gram REAL NOT NULL,
@@ -1114,6 +1115,8 @@ await db.execute(`
     updated_at TEXT NOT NULL
   )
 `);
+
+try { await db.execute("ALTER TABLE ad_tasks ADD COLUMN target_chat TEXT"); } catch (_) {}
 
 await db.execute(`
   CREATE TABLE IF NOT EXISTS ad_task_clicks (
@@ -3608,22 +3611,27 @@ app.post("/api/ads/create", async (req, res) => {
       description,
       platform,
       target_url,
-      target_clicks
+      target_clicks,
+      target_chat
     } = req.body || {};
 
     const cleanTitle = String(title || "").trim();
     const cleanDescription = String(description || "").trim();
     const cleanPlatform = String(platform || "").trim().toLowerCase();
     const cleanUrl = String(target_url || "").trim();
+    const cleanChat = String(target_chat || "").trim();
     const clicks = Number(target_clicks);
 
     const allowedPlatforms = [
-      "telegram",
+      "telegram_channel",
+      "telegram_group",
+      "telegram_bot",
       "website",
       "youtube",
       "instagram",
       "x",
-      "other"
+      "other",
+      "telegram"
     ];
 
     if (
@@ -3647,6 +3655,13 @@ app.post("/api/ads/create", async (req, res) => {
       return res.status(400).json({
         ok: false,
         error: "پلتفرم تبلیغ معتبر نیست."
+      });
+    }
+
+    if (["telegram_channel", "telegram_group"].includes(cleanPlatform) && !cleanChat) {
+      return res.status(400).json({
+        ok: false,
+        error: "Enter the Telegram channel/group username or chat ID. Add the SINAPS bot as an administrator so membership can be checked."
       });
     }
 
@@ -3695,6 +3710,7 @@ app.post("/api/ads/create", async (req, res) => {
           description,
           platform,
           target_url,
+          target_chat,
           target_clicks,
           valid_clicks,
           price_gram,
@@ -3705,7 +3721,7 @@ app.post("/api/ads/create", async (req, res) => {
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0,
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0,
                 'pending_payment', 0, ?, ?)
       `,
       args: [
@@ -3714,6 +3730,7 @@ app.post("/api/ads/create", async (req, res) => {
         cleanDescription,
         cleanPlatform,
         cleanUrl,
+        cleanChat || null,
         clicks,
         price,
         now,
@@ -3757,6 +3774,7 @@ app.get("/api/ads/my", async (req, res) => {
           description,
           platform,
           target_url,
+          target_chat,
           target_clicks,
           valid_clicks,
           price_gram,
@@ -3799,6 +3817,7 @@ app.get("/api/ads/active", async (req, res) => {
           description,
           platform,
           target_url,
+          target_chat,
           target_clicks,
           valid_clicks,
           reward_per_user,
@@ -3826,6 +3845,92 @@ app.get("/api/ads/active", async (req, res) => {
     });
   }
 });
+app.post("/api/ads/cancel", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const adId = Number(req.body?.ad_id);
+    if (!Number.isSafeInteger(adId) || adId <= 0) {
+      return res.status(400).json({ ok: false, error: "Invalid ad ID." });
+    }
+    const result = await db.execute({
+      sql: `UPDATE ad_tasks SET status = 'cancelled', updated_at = ?
+            WHERE id = ? AND telegram_id = ? AND status = 'pending_payment'
+            AND payment_verified = 0`,
+      args: [now(), adId, String(verified.id)]
+    });
+    if (!result.rowsAffected) {
+      return res.status(409).json({
+        ok: false,
+        error: "Only an unpaid advertisement can be cancelled."
+      });
+    }
+    return res.json({ ok: true, ad_id: adId, status: "cancelled" });
+  } catch (error) {
+    console.error("/api/ads/cancel:", error);
+    return res.status(500).json({ ok: false, error: "Could not cancel advertisement." });
+  }
+});
+
+app.post("/api/ads/complete", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const telegramId = String(verified.id);
+    const adId = Number(req.body?.ad_id);
+    if (!Number.isSafeInteger(adId) || adId <= 0) {
+      return res.status(400).json({ ok: false, error: "Invalid ad ID." });
+    }
+    const found = await db.execute({
+      sql: `SELECT id, telegram_id, platform, target_chat, target_clicks, valid_clicks
+            FROM ad_tasks WHERE id = ? AND status = 'active' AND payment_verified = 1
+            AND valid_clicks < target_clicks LIMIT 1`,
+      args: [adId]
+    });
+    const ad = found.rows[0];
+    if (!ad) return res.status(404).json({ ok: false, error: "Task is no longer active." });
+    if (String(ad.telegram_id) === telegramId) {
+      return res.status(403).json({ ok: false, error: "You cannot complete your own advertisement." });
+    }
+    if (["telegram_channel", "telegram_group", "telegram"].includes(String(ad.platform))) {
+      const chat = String(ad.target_chat || "").trim();
+      if (!chat) return res.status(400).json({ ok: false, error: "Advertiser has not configured a membership-check chat." });
+      const member = await telegramApi("getChatMember", { chat_id: chat, user_id: telegramId });
+      if (!member || !(["creator", "administrator", "member"].includes(member.status) ||
+          (member.status === "restricted" && member.is_member === true))) {
+        return res.status(403).json({ ok: false, error: "Join the Telegram channel/group first. Membership could not be verified." });
+      }
+    }
+    const prior = await db.execute({
+      sql: `SELECT id FROM ad_task_clicks WHERE task_id = ? AND telegram_id = ? LIMIT 1`,
+      args: [adId, telegramId]
+    });
+    if (prior.rows.length) return res.status(409).json({ ok: false, error: "You already completed this task." });
+    await db.execute({
+      sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status)
+            VALUES (?, ?, ?, 'completed')`,
+      args: [adId, telegramId, now()]
+    });
+    await db.execute({
+      sql: `UPDATE ad_tasks SET valid_clicks = valid_clicks + 1,
+            status = CASE WHEN valid_clicks + 1 >= target_clicks THEN 'completed' ELSE 'active' END,
+            updated_at = ? WHERE id = ? AND valid_clicks < target_clicks`,
+      args: [now(), adId]
+    });
+    const latest = await db.execute({
+      sql: `SELECT valid_clicks, target_clicks, status FROM ad_tasks WHERE id = ?`,
+      args: [adId]
+    });
+    return res.json({ ok: true, message: "Task completion recorded.", ad_id: adId, ...latest.rows[0] });
+  } catch (error) {
+    if (String(error?.message || "").includes("UNIQUE")) {
+      return res.status(409).json({ ok: false, error: "You already completed this task." });
+    }
+    console.error("/api/ads/complete:", error);
+    return res.status(500).json({ ok: false, error: "Could not verify task completion." });
+  }
+});
+
 // ============================================================
 // VERIFY AD PAYMENT
 // ============================================================
@@ -3961,8 +4066,15 @@ app.post("/api/ads/verify-payment", async (req, res) => {
 
     let matchedTx = null;
 
+    const adCreatedSeconds = Math.floor(new Date(ad.created_at).getTime() / 1000);
+
     for (const tx of transactions) {
       try {
+        const txTime = Number(tx.utime || tx.now || tx.timestamp || 0);
+        if (txTime > 0 && Number.isFinite(adCreatedSeconds) && txTime < adCreatedSeconds) {
+          continue;
+        }
+
         const inMsg =
           tx.in_msg ||
           tx.inMessage ||
