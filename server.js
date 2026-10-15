@@ -1131,6 +1131,21 @@ await db.execute(`
 `);
 
 await db.execute(`
+  CREATE TABLE IF NOT EXISTS ad_link_clicks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    telegram_id TEXT NOT NULL,
+    clicked_at TEXT NOT NULL,
+    UNIQUE (task_id, telegram_id)
+  )
+`);
+
+await db.execute(`
+  CREATE INDEX IF NOT EXISTS idx_ad_link_clicks_task
+  ON ad_link_clicks(task_id)
+`);
+
+await db.execute(`
   CREATE INDEX IF NOT EXISTS idx_ad_tasks_status
   ON ad_tasks(status)
 `);
@@ -3820,6 +3835,41 @@ app.get("/api/ads/my", async (req, res) => {
 });
 
 
+app.post("/api/ads/click", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const telegramId = String(verified.id);
+    const rawId = String(req.body?.task_id || "").trim();
+    const adId = Number(rawId.startsWith("ad:") ? rawId.slice(3) : rawId);
+    if (!Number.isSafeInteger(adId) || adId <= 0) {
+      return res.status(400).json({ error: "Invalid advertising task." });
+    }
+    const found = await db.execute({
+      sql: `SELECT id, telegram_id FROM ad_tasks WHERE id = ? AND status = 'active' AND payment_verified = 1 AND valid_clicks < target_clicks LIMIT 1`,
+      args: [adId]
+    });
+    const ad = found.rows[0];
+    if (!ad) return res.status(404).json({ error: "This ad is no longer active." });
+    if (String(ad.telegram_id) === telegramId) {
+      return res.status(403).json({ error: "You cannot click your own advertisement." });
+    }
+    // Count a user once per ad. This records interest only, never pays a reward.
+    await db.execute({
+      sql: `INSERT INTO ad_link_clicks (task_id, telegram_id, clicked_at) VALUES (?, ?, ?) ON CONFLICT(task_id, telegram_id) DO NOTHING`,
+      args: [adId, telegramId, now()]
+    });
+    const count = await db.execute({
+      sql: `SELECT COUNT(*) AS click_count FROM ad_link_clicks WHERE task_id = ?`,
+      args: [adId]
+    });
+    return res.json({ ok: true, click_count: Number(count.rows[0]?.click_count || 0) });
+  } catch (error) {
+    console.error("/api/ads/click:", error);
+    return res.status(500).json({ error: "Could not record ad click." });
+  }
+});
+
 app.get("/api/ads/active", async (req, res) => {
   try {
     const verified = requireAuth(req, res);
@@ -3836,7 +3886,8 @@ app.get("/api/ads/active", async (req, res) => {
           target_clicks,
           valid_clicks,
           reward_per_user,
-          created_at
+          created_at,
+          (SELECT COUNT(*) FROM ad_link_clicks lc WHERE lc.task_id = ad_tasks.id) AS click_count
         FROM ad_tasks
         WHERE status = 'active'
           AND payment_verified = 1
