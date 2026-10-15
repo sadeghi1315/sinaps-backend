@@ -3708,6 +3708,9 @@ app.post("/api/ads/create", async (req, res) => {
 
     const allowedPlatforms = [
       "telegram",
+      "channel",
+      "group",
+      "bot",
       "website",
       "youtube",
       "instagram",
