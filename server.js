@@ -94,7 +94,7 @@ const REFERRAL_RATE =
   0.15;
 
 const REFERRAL_JOIN_REWARD =
-  100;
+  10;
 
 const HOLDER_MIN_SNP =
   50000;
@@ -138,30 +138,15 @@ let treasuryJettonWallet = null;
 const BOOST_LEVELS = {
 
   tap: [
-    {
-      level: 2,
-      price: 2000,
-      name: "Tap ×2",
-      description: "2 SNP per tap"
-    },
-    {
-      level: 3,
-      price: 3000,
-      name: "Tap ×3",
-      description: "3 SNP per tap"
-    },
-    {
-      level: 4,
-      price: 5000,
-      name: "Tap ×4",
-      description: "4 SNP per tap"
-    },
-    {
-      level: 5,
-      price: 8000,
-      name: "Tap ×5",
-      description: "5 SNP per tap"
-    }
+    { level: 2, price: 2000, name: "Tap ×2", description: "0.1 SNP per tap" },
+    { level: 3, price: 3000, name: "Tap ×3", description: "0.2 SNP per tap" },
+    { level: 4, price: 5000, name: "Tap ×4", description: "0.3 SNP per tap" },
+    { level: 5, price: 8000, name: "Tap ×5", description: "0.4 SNP per tap" },
+    { level: 6, price: 10000, name: "Tap ×6", description: "0.5 SNP per tap" },
+    { level: 7, price: 12000, name: "Tap ×7", description: "0.6 SNP per tap" },
+    { level: 8, price: 15000, name: "Tap ×8", description: "0.7 SNP per tap" },
+    { level: 9, price: 18000, name: "Tap ×9", description: "0.8 SNP per tap" },
+    { level: 10, price: 22000, name: "Tap ×10", description: "0.9 SNP per tap" }
   ],
 
   energy: [
@@ -232,7 +217,7 @@ const TASKS = [
     name: "Join SINAPS Channel",
     title: "Join SINAPS Channel",
     icon: "📢",
-    reward: 100,
+    reward: 10,
     type: "telegram",
     chat: "@SINAPS_COIN",
     url: "https://t.me/SINAPS_COIN"
@@ -243,10 +228,21 @@ const TASKS = [
     name: "Join SINAPS Group",
     title: "Join SINAPS Group",
     icon: "👥",
-    reward: 70,
+    reward: 7,
     type: "telegram",
     chat: "@SINAPS_Group",
     url: "https://t.me/SINAPS_Group"
+  },
+
+  {
+    id: "withdrawals_channel",
+    name: "Join SINAPS Withdrawals Channel",
+    title: "Join SINAPS Withdrawals Channel",
+    icon: "💸",
+    reward: 10,
+    type: "telegram",
+    chat: "@SINAPS_Withdrawals",
+    url: "https://t.me/SINAPS_Withdrawals"
   },
 
   {
@@ -254,7 +250,7 @@ const TASKS = [
     name: "Hold 50,000 SNP",
     title: "Hold 50,000 SNP",
     icon: "💎",
-    reward: 1000,
+    reward: 100,
     type: "holder",
     required: HOLDER_MIN_SNP,
     url: "#"
@@ -265,7 +261,7 @@ const TASKS = [
     name: "Follow SINAPS on X",
     title: "Follow SINAPS on X",
     icon: "𝕏",
-    reward: 100,
+    reward: 10,
     type: "external",
     url: "https://x.com/SINAPS_SNP"
   },
@@ -275,7 +271,7 @@ const TASKS = [
     name: "Like & Repost SINAPS",
     title: "Like & Repost SINAPS",
     icon: "❤️",
-    reward: 50,
+    reward: 5,
     type: "external",
     url: "https://x.com/SINAPS_SNP/status/2099008238251311432"
   },
@@ -285,7 +281,7 @@ const TASKS = [
     name: "Connect TON Wallet",
     title: "Connect TON Wallet",
     icon: "💎",
-    reward: 50,
+    reward: 5,
     type: "wallet",
     url: "#"
   },
@@ -295,7 +291,7 @@ const TASKS = [
     name: "Invite 3 Friends",
     title: "Invite 3 Friends",
     icon: "👥",
-    reward: 300,
+    reward: 30,
     type: "referral",
     required: 3,
     url: "#"
@@ -306,7 +302,7 @@ const TASKS = [
     name: "Invite 10 Friends",
     title: "Invite 10 Friends",
     icon: "🔥",
-    reward: 1500,
+    reward: 150,
     type: "referral",
     required: 10,
     url: "#"
@@ -317,7 +313,7 @@ const TASKS = [
     name: "Invite 15 Friends",
     title: "Invite 15 Friends",
     icon: "🚀",
-    reward: 3000,
+    reward: 300,
     type: "referral",
     required: 15,
     url: "#"
@@ -1174,7 +1170,7 @@ await db.execute(`
     ["referral_code", "TEXT"],
     ["referred_by", "TEXT"],
     ["wallet_address", "TEXT"],
-    ["tap_power", "INTEGER DEFAULT 1"],
+    ["tap_power", "REAL DEFAULT 0.1"],
     ["tap_boost_level", "INTEGER DEFAULT 1"],
     ["energy_boost_level", "INTEGER DEFAULT 1"],
     ["recharge_multiplier", "INTEGER DEFAULT 1"],
@@ -1287,6 +1283,13 @@ await db.execute(`
   await db.execute(`CREATE TABLE IF NOT EXISTS spin_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id TEXT NOT NULL, spin_number INTEGER NOT NULL, ticket_id INTEGER, spin_kind TEXT NOT NULL, prize_type TEXT NOT NULL, reward REAL NOT NULL DEFAULT 0, prize_index INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(telegram_id, spin_number)
   )`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS app_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+  const scaleMigration = await db.execute({ sql: `SELECT migration_key FROM app_migrations WHERE migration_key = ? LIMIT 1`, args: ["balance_scale_10x_20261016"] });
+  if (!scaleMigration.rows.length) {
+    await db.execute(`UPDATE users SET balance = CAST(balance AS REAL) / 10`);
+    await db.execute({ sql: `INSERT INTO app_migrations (migration_key, applied_at) VALUES (?, ?)`, args: ["balance_scale_10x_20261016", now()] });
+  }
+
   await db.execute(`CREATE TABLE IF NOT EXISTS spin_ton_payouts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     spin_history_id INTEGER NOT NULL UNIQUE,
@@ -1393,7 +1396,7 @@ await db.execute(`
 
   await db.execute(`
     UPDATE users
-    SET tap_power = 1
+    SET tap_power = 0.1
     WHERE tap_power IS NULL
   `);
 
@@ -1957,7 +1960,7 @@ app.post(
       }
 
       const energy = Math.max(0, Number(user.energy || 0));
-      const tapPower = Math.max(1, Number(user.tap_power || 1));
+      const tapPower = Math.max(0.1, Number(user.tap_power || 0.1));
       const usable = Math.min(count, energy);
 
       if (usable <= 0) {
@@ -2361,7 +2364,7 @@ app.post(
           `,
 
           args: [
-            next.level,
+            Number((next.level - 1) / 10),
             next.level,
             telegramId
           ]
@@ -2437,7 +2440,7 @@ app.post(
           `,
 
           args: [
-            next.level,
+            Number((next.level - 1) / 10),
             next.level,
             telegramId
           ]
@@ -3379,7 +3382,7 @@ async function getTaskStatus(
     title: String(ad.title || "Community advertisement"),
     description: String(ad.description || ""),
     icon: "📢",
-    reward: 100,
+    reward: 10,
     type: "ad_task",
     platform: String(ad.platform || "telegram"),
     url: String(ad.target_url || "#"),
@@ -3516,7 +3519,7 @@ app.post("/api/spin/claim", async (req, res) => {
     } else {
       const normalSlots = [0, 1, 2, 3, 4, 5, 7, 8];
       prizeIndex = normalSlots[crypto.randomInt(normalSlots.length)];
-      const rewards = { 0: 10, 1: 25, 2: 50, 3: 100, 4: 250, 5: 500, 7: 0, 8: 0 };
+      const rewards = { 0: 1, 1: 2.5, 2: 5, 3: 10, 4: 25, 5: 50, 7: 0, 8: 0 };
       reward = rewards[prizeIndex];
       prizeType = reward > 0 ? "SNP" : "NONE";
     }
@@ -3940,7 +3943,7 @@ app.post("/api/ads/click", async (req, res) => {
       sql: `INSERT INTO ad_link_clicks (task_id, telegram_id, clicked_at) VALUES (?, ?, ?) ON CONFLICT(task_id, telegram_id) DO NOTHING`,
       args: [adId, telegramId, now()]
     });
-    const reward = Number(ad.reward_per_user || 100) || 100;
+    const reward = Number(ad.reward_per_user || 10) || 10;
     const credit = await tx.execute({
       sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`,
       args: [reward, telegramId]
