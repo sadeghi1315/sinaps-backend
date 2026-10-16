@@ -3887,6 +3887,7 @@ app.get("/api/ads/my", async (req, res) => {
 
 
 app.post("/api/ads/click", async (req, res) => {
+  let tx;
   try {
     const verified = requireAuth(req, res);
     if (!verified) return;
@@ -3896,28 +3897,68 @@ app.post("/api/ads/click", async (req, res) => {
     if (!Number.isSafeInteger(adId) || adId <= 0) {
       return res.status(400).json({ error: "Invalid advertising task." });
     }
-    const found = await db.execute({
-      sql: `SELECT id, telegram_id FROM ad_tasks WHERE id = ? AND status = 'active' AND payment_verified = 1 AND valid_clicks < target_clicks LIMIT 1`,
+
+    tx = await db.transaction("write");
+    const found = await tx.execute({
+      sql: `SELECT * FROM ad_tasks WHERE id = ? AND status = 'active' AND payment_verified = 1 AND valid_clicks < target_clicks LIMIT 1`,
       args: [adId]
     });
     const ad = found.rows[0];
-    if (!ad) return res.status(404).json({ error: "This ad is no longer active." });
+    if (!ad) {
+      await tx.rollback(); tx = null;
+      return res.status(404).json({ error: "This ad is no longer active." });
+    }
     if (String(ad.telegram_id) === telegramId) {
+      await tx.rollback(); tx = null;
       return res.status(403).json({ error: "You cannot click your own advertisement." });
     }
-    // Count a user once per ad. This records interest only, never pays a reward.
-    await db.execute({
+
+    // A click is the completion event for an ad task: award once per user/ad.
+    // The unique key on ad_task_clicks prevents repeat clicks from paying twice.
+    try {
+      await tx.execute({
+        sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status, reviewed_at, reward_paid) VALUES (?, ?, ?, 'completed', ?, 1)`,
+        args: [adId, telegramId, now(), now()]
+      });
+    } catch (insertError) {
+      if (String(insertError.message || "").toLowerCase().includes("unique")) {
+        await tx.rollback(); tx = null;
+        const existingUser = await getUser(telegramId);
+        const clickCount = await db.execute({sql:`SELECT COUNT(*) AS click_count FROM ad_link_clicks WHERE task_id = ?`, args:[adId]});
+        return res.json({ok:true, already_completed:true, reward:0, balance:Number(existingUser?.balance || 0), click_count:Number(clickCount.rows[0]?.click_count || 0), message:"You have already claimed this ad reward."});
+      }
+      throw insertError;
+    }
+
+    const advanced = await tx.execute({
+      sql: `UPDATE ad_tasks SET valid_clicks = valid_clicks + 1, status = CASE WHEN valid_clicks + 1 >= target_clicks THEN 'completed' ELSE status END, updated_at = ? WHERE id = ? AND status = 'active' AND valid_clicks < target_clicks`,
+      args: [now(), adId]
+    });
+    if (Number(advanced.rowsAffected || 0) !== 1) throw new Error("This ad has reached its target.");
+
+    await tx.execute({
       sql: `INSERT INTO ad_link_clicks (task_id, telegram_id, clicked_at) VALUES (?, ?, ?) ON CONFLICT(task_id, telegram_id) DO NOTHING`,
       args: [adId, telegramId, now()]
     });
-    const count = await db.execute({
-      sql: `SELECT COUNT(*) AS click_count FROM ad_link_clicks WHERE task_id = ?`,
-      args: [adId]
+    const reward = Number(ad.reward_per_user || 100) || 100;
+    const credit = await tx.execute({
+      sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`,
+      args: [reward, telegramId]
     });
-    return res.json({ ok: true, click_count: Number(count.rows[0]?.click_count || 0) });
+    if (Number(credit.rowsAffected || 0) !== 1) throw new Error("Could not credit advertising task reward.");
+    await tx.execute({
+      sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'TASK', ?, 'Completed', ?, ?)`,
+      args: [telegramId, reward, `Advertising link click reward: ${String(ad.title || ad.id)}`, now()]
+    });
+    await tx.commit(); tx = null;
+
+    const fresh = await getUser(telegramId);
+    const count = await db.execute({sql:`SELECT COUNT(*) AS click_count FROM ad_link_clicks WHERE task_id = ?`, args:[adId]});
+    return res.json({ok:true, reward, balance:Number(fresh?.balance || 0), click_count:Number(count.rows[0]?.click_count || 0), completed:true});
   } catch (error) {
+    try { if (tx) await tx.rollback(); } catch (_) {}
     console.error("/api/ads/click:", error);
-    return res.status(500).json({ error: "Could not record ad click." });
+    return res.status(500).json({ error: "Could not record the ad click and reward." });
   }
 });
 
