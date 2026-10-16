@@ -6889,23 +6889,87 @@ app.post(
       }
 
 
-      const text =
-        String(
-          message.text || ""
-        );
+      const text = String(message.text || "").trim();
+      const chatId = String(message.chat.id);
+      const senderId = String(message.from?.id || "");
+      const ADMIN_TELEGRAM_ID = String(process.env.ADMIN_TELEGRAM_ID || "").trim();
 
-
-      if (
-        !/^\/start(?:@\w+)?(?:\s+.*)?$/i
-          .test(text)
-      ) {
+      // Anyone may ask for their own numeric Telegram ID. This does not grant admin access.
+      if (/^\/myid(?:@\w+)?$/i.test(text)) {
+        await telegramApi("sendMessage", {
+          chat_id: chatId,
+          text: `Your Telegram ID: ${senderId}\nSet this value as ADMIN_TELEGRAM_ID in Render to enable admin broadcasts.`
+        });
         return;
       }
 
+      const isAdmin = !!ADMIN_TELEGRAM_ID && senderId === ADMIN_TELEGRAM_ID && chatId === ADMIN_TELEGRAM_ID;
 
-      const chatId =
-        message.chat.id;
+      if (/^\/broadcast(?:@\w+)?$/i.test(text)) {
+        if (!isAdmin) {
+          await telegramApi("sendMessage", { chat_id: chatId, text: "⛔ This command is only available to the bot administrator." });
+          return;
+        }
+        await telegramApi("sendMessage", {
+          chat_id: chatId,
+          text: "📣 Broadcast mode enabled. Send the exact message, photo, video, or other supported post you want to forward to registered users. Then use /broadcast_send to confirm or /broadcast_cancel to cancel."
+        });
+        globalThis.__sinapsBroadcastDraft = { adminId: senderId, chatId, messageId: null };
+        return;
+      }
 
+      if (/^\/broadcast_cancel(?:@\w+)?$/i.test(text)) {
+        if (!isAdmin) {
+          await telegramApi("sendMessage", { chat_id: chatId, text: "⛔ Admin only." });
+          return;
+        }
+        globalThis.__sinapsBroadcastDraft = null;
+        await telegramApi("sendMessage", { chat_id: chatId, text: "Broadcast cancelled." });
+        return;
+      }
+
+      if (/^\/broadcast_send(?:@\w+)?$/i.test(text)) {
+        if (!isAdmin) {
+          await telegramApi("sendMessage", { chat_id: chatId, text: "⛔ Admin only." });
+          return;
+        }
+        const draft = globalThis.__sinapsBroadcastDraft;
+        if (!draft || draft.adminId !== senderId || !draft.messageId) {
+          await telegramApi("sendMessage", { chat_id: chatId, text: "No message is ready. Send /broadcast first, then send the message you want to broadcast." });
+          return;
+        }
+        globalThis.__sinapsBroadcastDraft = null;
+        await telegramApi("sendMessage", { chat_id: chatId, text: "⏳ Broadcast started. I will send a report when it finishes." });
+        try {
+          const result = await db.execute({ sql: "SELECT DISTINCT telegram_id FROM users", args: [] });
+          const ids = [...new Set(result.rows.map(row => String(row.telegram_id || "")).filter(id => /^\d+$/.test(id)))];
+          let sent = 0, failed = 0;
+          for (const targetId of ids) {
+            if (targetId === senderId) continue;
+            const copied = await telegramApi("copyMessage", { chat_id: targetId, from_chat_id: draft.chatId, message_id: draft.messageId });
+            if (copied) sent++; else failed++;
+            // Stay comfortably below Telegram's usual per-chat/global send limits.
+            await new Promise(resolve => setTimeout(resolve, 45));
+          }
+          await telegramApi("sendMessage", { chat_id: chatId, text: `✅ Broadcast finished\n\n👥 Registered users: ${ids.length}\n📨 Sent: ${sent}\n❌ Failed: ${failed}` });
+        } catch (broadcastError) {
+          console.error("SINAPS broadcast failed:", broadcastError);
+          await telegramApi("sendMessage", { chat_id: chatId, text: "❌ Broadcast failed while reading the users database. Check Render logs." });
+        }
+        return;
+      }
+
+      // While the admin is composing a broadcast, remember the message to copy.
+      const draft = globalThis.__sinapsBroadcastDraft;
+      if (draft && draft.adminId === senderId && draft.chatId === chatId && !/^\/broadcast(?:_|@|\s|$)/i.test(text)) {
+        draft.messageId = message.message_id;
+        await telegramApi("sendMessage", { chat_id: chatId, text: "Preview received. When ready, send /broadcast_send to deliver it to users, or /broadcast_cancel to discard it." });
+        return;
+      }
+
+      if (!/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+        return;
+      }
 
       const photoUrl =
         "https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true";
