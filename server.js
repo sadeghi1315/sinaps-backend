@@ -77,8 +77,8 @@ const TREASURY_MNEMONIC =
   process.env.TREASURY_MNEMONIC ||
   "";
 
-const FEE_NANO =
-  "100000000";
+const WITHDRAW_FEE_NANO_PER_SNP = 10000n; // 0.1 TON per 10,000 SNP
+const MIN_WITHDRAW_HOLDING_SNP = 50000;
 
 const SNP_DECIMALS =
   9;
@@ -5453,7 +5453,7 @@ async function findFeePayment(
 
       if (
         value !==
-        String(FEE_NANO)
+        String(withdrawal.fee_nano || "0")
       ) {
         continue;
       }
@@ -5900,6 +5900,27 @@ async function waitForPayoutTransaction(
 }
 
 
+// Verify current on-chain SNP holdings using TONAPI. Fail closed if the balance cannot be verified.
+async function getCurrentSnpHolding(walletAddress) {
+  const wallet = Address.parse(String(walletAddress || "").trim()).toString({ bounceable: false });
+  const endpoint = `https://tonapi.io/v2/accounts/${encodeURIComponent(wallet)}/jettons`;
+  const response = await fetch(endpoint, { headers: { accept: "application/json" } });
+  if (!response.ok) throw new Error("Could not verify your current SNP holdings on-chain. Please try again later.");
+  const data = await response.json();
+  const masterRaw = Address.parse(String(SNP_CONTRACT).trim()).toRawString().toLowerCase();
+  const entries = Array.isArray(data.balances) ? data.balances : [];
+  for (const entry of entries) {
+    const jettonAddress = entry?.jetton?.address || entry?.jetton?.master?.address || "";
+    let raw = "";
+    try { raw = Address.parse(String(jettonAddress)).toRawString().toLowerCase(); } catch (_) { continue; }
+    if (raw === masterRaw) {
+      const balanceRaw = BigInt(String(entry.balance || "0"));
+      return Number(balanceRaw) / (10 ** SNP_DECIMALS);
+    }
+  }
+  return 0;
+}
+
 // ============================================================
 // WITHDRAW CREATE
 // ============================================================
@@ -5925,16 +5946,11 @@ app.post(
         verified.id;
 
 
-      const requestedAmount = safeInt(
-  req.body.amount,
-  0
-);
-
-// مبلغ واقعی کسر از موجودی
-const amount = requestedAmount;
-
-// مبلغی که به کیف پول پرداخت می‌شود
-const payoutAmount = Math.floor(requestedAmount / 10);
+      const amount = safeInt(req.body.amount, 0);
+      const payoutAmount = amount;
+      const feeNanoBig = BigInt(amount) * WITHDRAW_FEE_NANO_PER_SNP;
+      const feeNano = feeNanoBig.toString();
+      const feeTon = Number(feeNanoBig) / 1e9;
 
 
       const requestedWallet =
@@ -5944,7 +5960,7 @@ const payoutAmount = Math.floor(requestedAmount / 10);
         ).trim();
 
 
-      if (amount <= 0 || payoutAmount <= 0) {
+      if (amount <= 0 || payoutAmount <= 0 || !Number.isSafeInteger(amount)) {
   return res.status(400).json({
     error: "Invalid withdrawal amount"
   });
@@ -6008,6 +6024,19 @@ const payoutAmount = Math.floor(requestedAmount / 10);
         return res.status(400).json({ error: "Wallet does not match your connected wallet" });
       }
 
+      let currentSnpHolding;
+      try {
+        currentSnpHolding = await getCurrentSnpHolding(normalizedWallet);
+      } catch (holdingError) {
+        return res.status(503).json({ error: holdingError.message || "Could not verify SNP holdings. Please try again later." });
+      }
+      if (currentSnpHolding < MIN_WITHDRAW_HOLDING_SNP) {
+        return res.status(403).json({
+          error: `Withdrawals require at least ${MIN_WITHDRAW_HOLDING_SNP.toLocaleString()} SNP in your connected wallet. Current verified balance: ${Math.floor(currentSnpHolding).toLocaleString()} SNP.`,
+          required_holding_snp: MIN_WITHDRAW_HOLDING_SNP,
+          current_holding_snp: currentSnpHolding
+        });
+      }
 
       const withdrawalId =
         `SNP-${Date.now()}-${crypto
@@ -6077,9 +6106,9 @@ const payoutAmount = Math.floor(requestedAmount / 10);
 
             payoutAmount,
 
-            "0.1",
+            feeTon.toFixed(9).replace(/0+$/, "").replace(/\.$/, ""),
 
-            FEE_NANO,
+            feeNano,
 
             TREASURY_WALLET,
 
@@ -6143,7 +6172,10 @@ const payoutAmount = Math.floor(requestedAmount / 10);
           withdrawalId,
 
         fee_nano:
-          FEE_NANO,
+          feeNano,
+
+        fee_ton:
+          feeTon,
 
         treasury_wallet:
           TREASURY_WALLET,
