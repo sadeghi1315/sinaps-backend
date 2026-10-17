@@ -94,7 +94,7 @@ const REFERRAL_RATE =
   0.15;
 
 const REFERRAL_JOIN_REWARD =
-  50;
+  10;
 
 const HOLDER_MIN_SNP =
   50000;
@@ -138,15 +138,15 @@ let treasuryJettonWallet = null;
 const BOOST_LEVELS = {
 
   tap: [
-    { level: 2, price: 2000, name: "Tap ×2", description: "0.2 SNP per tap" },
-    { level: 3, price: 3000, name: "Tap ×3", description: "0.3 SNP per tap" },
-    { level: 4, price: 5000, name: "Tap ×4", description: "0.4 SNP per tap" },
-    { level: 5, price: 8000, name: "Tap ×5", description: "0.5 SNP per tap" },
-    { level: 6, price: 10000, name: "Tap ×6", description: "0.6 SNP per tap" },
-    { level: 7, price: 12000, name: "Tap ×7", description: "0.7 SNP per tap" },
-    { level: 8, price: 15000, name: "Tap ×8", description: "0.8 SNP per tap" },
-    { level: 9, price: 18000, name: "Tap ×9", description: "0.9 SNP per tap" },
-    { level: 10, price: 22000, name: "Tap ×10", description: "1.0 SNP per tap" }
+    { level: 2, price: 2000, name: "Tap ×2", description: "0.1 SNP per tap" },
+    { level: 3, price: 3000, name: "Tap ×3", description: "0.2 SNP per tap" },
+    { level: 4, price: 5000, name: "Tap ×4", description: "0.3 SNP per tap" },
+    { level: 5, price: 8000, name: "Tap ×5", description: "0.4 SNP per tap" },
+    { level: 6, price: 10000, name: "Tap ×6", description: "0.5 SNP per tap" },
+    { level: 7, price: 12000, name: "Tap ×7", description: "0.6 SNP per tap" },
+    { level: 8, price: 15000, name: "Tap ×8", description: "0.7 SNP per tap" },
+    { level: 9, price: 18000, name: "Tap ×9", description: "0.8 SNP per tap" },
+    { level: 10, price: 22000, name: "Tap ×10", description: "0.9 SNP per tap" }
   ],
 
   energy: [
@@ -250,7 +250,7 @@ const TASKS = [
     name: "Hold 50,000 SNP",
     title: "Hold 50,000 SNP",
     icon: "💎",
-    reward: 10,
+    reward: 100,
     type: "holder",
     required: HOLDER_MIN_SNP,
     url: "#"
@@ -645,7 +645,7 @@ function publicUser(user) {
 
     tap_power:
       Number(
-        user.tap_power || 0.1
+        user.tap_power || 1
       ),
 
     tap_boost_level:
@@ -1375,8 +1375,7 @@ await db.execute(`
 
     ["payout_tx_hash", "TEXT"],
     ["payout_query_id", "TEXT"],
-    ["payout_submitted_at", "TEXT"],
-    ["channel_posted_at", "TEXT"]
+    ["payout_submitted_at", "TEXT"]
 
   ];
 
@@ -1395,22 +1394,10 @@ await db.execute(`
   }
 
 
-  // Keep stored tap reward aligned with the user's level: level 1 = 0.1 SNP,
-  // level 5 = 0.5 SNP, ..., level 10 = 1.0 SNP.
   await db.execute(`
     UPDATE users
-    SET tap_boost_level = CASE
-          WHEN tap_boost_level IS NULL OR tap_boost_level < 1 THEN 1
-          WHEN tap_boost_level > 10 THEN 10
-          ELSE tap_boost_level
-        END
-  `);
-
-  await db.execute(`
-    UPDATE users
-    SET tap_power = ROUND(tap_boost_level * 0.1, 1)
+    SET tap_power = 0.1
     WHERE tap_power IS NULL
-       OR ABS(tap_power - ROUND(tap_boost_level * 0.1, 1)) > 0.000001
   `);
 
   await db.execute(`
@@ -1574,60 +1561,6 @@ async function telegramApi(
   } catch (error) {
     console.error(`Telegram API fetch failed for ${method}:`, error.message);
     return null;
-  }
-}
-
-
-// Publish only verified, successful SNP withdrawals to the public channel.
-// Each post includes the two requested quick links: chart and swap.
-async function publishSuccessfulWithdrawal(withdrawalId) {
-  try {
-    const channelId = String(process.env.WITHDRAWAL_CHANNEL_ID || "@SINAPS_Withdrawals").trim();
-    const result = await db.execute({
-      sql: `SELECT id, withdrawal_id, telegram_id, wallet_address, amount, fee_ton,
-                   status, payout_tx_hash, created_at, completed_at, channel_posted_at
-            FROM withdrawals WHERE withdrawal_id = ? LIMIT 1`,
-      args: [String(withdrawalId)]
-    });
-    const w = result.rows?.[0];
-    if (!w || !["paid", "completed", "success", "successful"].includes(String(w.status || "").toLowerCase())) return false;
-    if (w.channel_posted_at) return true;
-
-    const amountRaw = Number(w.amount || 0);
-    const amountText = Number.isFinite(amountRaw) ? String(amountRaw) : String(w.amount || "Unknown");
-    const wallet = String(w.wallet_address || "Not available");
-    const hash = String(w.payout_tx_hash || "").trim();
-    const txUrl = hash ? `https://tonviewer.com/transaction/${encodeURIComponent(hash)}` : "https://tonviewer.com/";
-    const text = [
-      "🎉 SINAPS — New Withdrawal Processed!",
-      "",
-      `💰 Amount: ${amountText} SNP`,
-      `📦 Status: ✅ Paid on-chain`,
-      `🏦 To: ${wallet}`,
-      hash ? `🔗 Transaction: ${txUrl}` : "🔗 Transaction: hash unavailable",
-      `🕒 Completed: ${String(w.completed_at || w.created_at || "Unknown")}`
-    ].join("\n");
-
-    const posted = await telegramApi("sendMessage", {
-      chat_id: channelId,
-      text,
-      disable_web_page_preview: false,
-      reply_markup: {
-        inline_keyboard: [[
-          { text: "🚀 Open SINAPS Mini App", url: "https://t.me/SNPCOINBot?startapp" },
-          { text: "🔄 Swap on DeDust", url: "https://dedust.io/swap/GRAM/EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls?amount=1000000000" }
-        ]]
-      }
-    });
-    if (!posted?.message_id) return false;
-    await db.execute({
-      sql: "UPDATE withdrawals SET channel_posted_at = ? WHERE id = ? AND (channel_posted_at IS NULL OR channel_posted_at = '')",
-      args: [new Date().toISOString(), w.id]
-    });
-    return true;
-  } catch (error) {
-    console.error("publishSuccessfulWithdrawal failed:", error?.message || error);
-    return false;
   }
 }
 
@@ -2027,8 +1960,7 @@ app.post(
       }
 
       const energy = Math.max(0, Number(user.energy || 0));
-      const tapLevel = Math.min(10, Math.max(1, Number(user.tap_boost_level || 1)));
-      const tapPower = Number((tapLevel * 0.1).toFixed(1));
+      const tapPower = Math.max(0.1, Number(user.tap_power || 0.1));
       const usable = Math.min(count, energy);
 
       if (usable <= 0) {
@@ -2432,7 +2364,7 @@ app.post(
           `,
 
           args: [
-            Number((next.level * 0.1).toFixed(1)),
+            Number((next.level - 1) / 10),
             next.level,
             telegramId
           ]
@@ -2508,7 +2440,7 @@ app.post(
           `,
 
           args: [
-            Number((next.level * 0.1).toFixed(1)),
+            Number((next.level - 1) / 10),
             next.level,
             telegramId
           ]
@@ -3426,36 +3358,39 @@ async function getTaskStatus(
     }
   );
 
+  // Paid, active advertising tasks are shown in the main Tasks list to everyone
+  // except their creator. My Ads remains the creator's management area only.
   const adResult = await db.execute({
     sql: `
-      SELECT a.id, a.title, a.description, a.platform, a.target_url,
-             a.target_clicks, a.valid_clicks, a.reward_per_user,
-             c.status AS claim_status
+      SELECT a.id, a.telegram_id, a.title, a.description, a.platform,
+             a.target_url, a.reward_per_user, a.target_clicks, a.valid_clicks,
+             (SELECT COUNT(*) FROM ad_task_clicks c
+                WHERE c.task_id = a.id AND c.telegram_id = ?) AS completed_by_user
       FROM ad_tasks a
-      LEFT JOIN ad_task_clicks c
-        ON c.task_id = a.id AND c.telegram_id = ?
       WHERE a.status = 'active'
         AND a.payment_verified = 1
         AND a.valid_clicks < a.target_clicks
-        AND a.telegram_id <> ?
-      ORDER BY a.id DESC
-      LIMIT 100
+        AND CAST(a.telegram_id AS TEXT) <> ?
+      ORDER BY a.created_at ASC
     `,
     args: [String(telegramId), String(telegramId)]
   });
 
-  const adTasks = adResult.rows.map(ad => ({
-    id: `ad:${Number(ad.id)}`,
-    name: String(ad.title || "Community advertisement"),
-    title: String(ad.title || "Community advertisement"),
-    description: String(ad.description || ""),
-    icon: "📢",
-    reward: 10,
-    type: "ad_task",
-    platform: String(ad.platform || "telegram"),
-    url: String(ad.target_url || "#"),
-    completed: String(ad.claim_status || "").toLowerCase() === "completed"
-  }));
+  const adTasks = adResult.rows
+    .filter(ad => Number(ad.completed_by_user || 0) === 0)
+    .map(ad => ({
+      id: `ad:${Number(ad.id)}`,
+      type: "ad_task",
+      name: String(ad.title || "Advertising task"),
+      description: String(ad.description || ""),
+      icon: "📢",
+      url: String(ad.target_url || ""),
+      reward: Number(ad.reward_per_user || 10),
+      completed: false,
+      platform: String(ad.platform || ""),
+      valid_clicks: Number(ad.valid_clicks || 0),
+      target_clicks: Number(ad.target_clicks || 0)
+    }));
 
   return [...staticTasks, ...adTasks];
 }
@@ -3587,7 +3522,7 @@ app.post("/api/spin/claim", async (req, res) => {
     } else {
       const normalSlots = [0, 1, 2, 3, 4, 5, 7, 8];
       prizeIndex = normalSlots[crypto.randomInt(normalSlots.length)];
-      const rewards = { 0: 0.1, 1: 0.25, 2: 0.5, 3: 1, 4: 2.5, 5: 5, 7: 0, 8: 0 };
+      const rewards = { 0: 1, 1: 2.5, 2: 5, 3: 10, 4: 25, 5: 50, 7: 0, 8: 0 };
       reward = rewards[prizeIndex];
       prizeType = reward > 0 ? "SNP" : "NONE";
     }
@@ -6519,8 +6454,6 @@ app.post(
               ]
             });
 
-            await publishSuccessfulWithdrawal(id);
-
           } else {
 
             return res.json({
@@ -6977,87 +6910,6 @@ app.post(
       }
 
       const isAdmin = !!ADMIN_TELEGRAM_ID && senderId === ADMIN_TELEGRAM_ID && chatId === ADMIN_TELEGRAM_ID;
-
-      // One-time historical withdrawal backfill. Posts only rows not already
-      // published by this command; successful sends are marked in Turso.
-      if (/^\/withdrawals_backfill(?:@\w+)?$/i.test(text)) {
-        if (!isAdmin) {
-          await telegramApi("sendMessage", {
-            chat_id: chatId,
-            text: "⛔ Admin only."
-          });
-          return;
-        }
-
-        const channelId = String(process.env.WITHDRAWAL_CHANNEL_ID || "@SINAPS_Withdrawals").trim();
-        const pending = await db.execute({
-          sql: `SELECT id, withdrawal_id, telegram_id, wallet_address, amount, fee_ton,
-                       status, fee_tx_hash, payout_tx_hash, created_at, completed_at
-                FROM withdrawals
-                WHERE (channel_posted_at IS NULL OR channel_posted_at = '')
-                  AND LOWER(COALESCE(status, '')) IN ('paid', 'completed', 'success', 'successful')
-                ORDER BY created_at ASC, id ASC`
-        });
-        const rows = pending.rows || [];
-        let sent = 0;
-        let failed = 0;
-
-        await telegramApi("sendMessage", {
-          chat_id: chatId,
-          text: `📣 Historical withdrawal report started.
-Records to publish: ${rows.length}
-Target: ${channelId}`
-        });
-
-        for (const w of rows) {
-          const amountRaw = Number(w.amount || 0);
-          const amountText = Number.isFinite(amountRaw) ? String(amountRaw) : String(w.amount || "Unknown");
-          const status = String(w.status || "unknown");
-          const hash = String(w.payout_tx_hash || w.fee_tx_hash || "Not available");
-          const created = String(w.created_at || "Unknown");
-          const txUrl = w.payout_tx_hash
-            ? `https://tonviewer.com/transaction/${encodeURIComponent(String(w.payout_tx_hash))}`
-            : "https://tonviewer.com/";
-          const body = [
-            "🎉 SINAPS — Withdrawal Processed!",
-            "",
-            `💰 Amount: ${amountText} SNP`,
-            "📦 Status: ✅ Paid on-chain",
-            `🏦 To: ${String(w.wallet_address || "Not available")}`,
-            w.payout_tx_hash ? `🔗 View transaction: ${txUrl}` : `🔗 Transaction: ${hash}`,
-            `🕒 Completed: ${String(w.completed_at || created)}`
-          ].join("\n");
-
-          const posted = await telegramApi("sendMessage", {
-            chat_id: channelId,
-            text: body,
-            disable_web_page_preview: false,
-            reply_markup: {
-              inline_keyboard: [[
-                { text: "🚀 Open SINAPS Mini App", url: "https://t.me/SNPCOINBot?startapp" },
-                { text: "🔄 Swap on DeDust", url: "https://dedust.io/swap/GRAM/EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls?amount=1000000000" }
-              ]]
-            }
-          });
-          if (posted?.message_id) {
-            await db.execute({
-              sql: "UPDATE withdrawals SET channel_posted_at = ? WHERE id = ?",
-              args: [new Date().toISOString(), w.id]
-            });
-            sent++;
-          } else {
-            failed++;
-          }
-          // Stay comfortably under Telegram's channel rate limits.
-          await new Promise(resolve => setTimeout(resolve, 1100));
-        }
-
-        await telegramApi("sendMessage", {
-          chat_id: chatId,
-          text: `✅ Historical withdrawal backfill finished.\nPublished: ${sent}\nFailed: ${failed}\nRemaining failed records can be retried by running /withdrawals_backfill again.`
-        });
-        return;
-      }
 
       if (/^\/broadcast(?:@\w+)?$/i.test(text)) {
         if (!isAdmin) {
