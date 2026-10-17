@@ -1578,6 +1578,60 @@ async function telegramApi(
 }
 
 
+// Publish only verified, successful SNP withdrawals to the public channel.
+// Each post includes the two requested quick links: chart and swap.
+async function publishSuccessfulWithdrawal(withdrawalId) {
+  try {
+    const channelId = String(process.env.WITHDRAWAL_CHANNEL_ID || "@SINAPS_Withdrawals").trim();
+    const result = await db.execute({
+      sql: `SELECT id, withdrawal_id, telegram_id, wallet_address, amount, fee_ton,
+                   status, payout_tx_hash, created_at, completed_at, channel_posted_at
+            FROM withdrawals WHERE withdrawal_id = ? LIMIT 1`,
+      args: [String(withdrawalId)]
+    });
+    const w = result.rows?.[0];
+    if (!w || !["paid", "completed", "success", "successful"].includes(String(w.status || "").toLowerCase())) return false;
+    if (w.channel_posted_at) return true;
+
+    const amountRaw = Number(w.amount || 0);
+    const amountText = Number.isFinite(amountRaw) ? String(amountRaw) : String(w.amount || "Unknown");
+    const wallet = String(w.wallet_address || "Not available");
+    const hash = String(w.payout_tx_hash || "").trim();
+    const txUrl = hash ? `https://tonviewer.com/transaction/${encodeURIComponent(hash)}` : "https://tonviewer.com/";
+    const text = [
+      "🎉 SINAPS — New Withdrawal Processed!",
+      "",
+      `💰 Amount: ${amountText} SNP`,
+      `📦 Status: ✅ Paid on-chain`,
+      `🏦 To: ${wallet}`,
+      hash ? `🔗 Transaction: ${txUrl}` : "🔗 Transaction: hash unavailable",
+      `🕒 Completed: ${String(w.completed_at || w.created_at || "Unknown")}`
+    ].join("\n");
+
+    const posted = await telegramApi("sendMessage", {
+      chat_id: channelId,
+      text,
+      disable_web_page_preview: false,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🚀 Open SINAPS Mini App", url: "https://t.me/SNPCOINBot?startapp" },
+          { text: "🔄 Swap on DeDust", url: "https://dedust.io/swap/GRAM/EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls?amount=1000000000" }
+        ]]
+      }
+    });
+    if (!posted?.message_id) return false;
+    await db.execute({
+      sql: "UPDATE withdrawals SET channel_posted_at = ? WHERE id = ? AND (channel_posted_at IS NULL OR channel_posted_at = '')",
+      args: [new Date().toISOString(), w.id]
+    });
+    return true;
+  } catch (error) {
+    console.error("publishSuccessfulWithdrawal failed:", error?.message || error);
+    return false;
+  }
+}
+
+
 async function isTelegramMember(
   chat,
   telegramId
@@ -6465,6 +6519,8 @@ app.post(
               ]
             });
 
+            await publishSuccessfulWithdrawal(id);
+
           } else {
 
             return res.json({
@@ -6938,7 +6994,8 @@ app.post(
           sql: `SELECT id, withdrawal_id, telegram_id, wallet_address, amount, fee_ton,
                        status, fee_tx_hash, payout_tx_hash, created_at, completed_at
                 FROM withdrawals
-                WHERE channel_posted_at IS NULL OR channel_posted_at = ''
+                WHERE (channel_posted_at IS NULL OR channel_posted_at = '')
+                  AND LOWER(COALESCE(status, '')) IN ('paid', 'completed', 'success', 'successful')
                 ORDER BY created_at ASC, id ASC`
         });
         const rows = pending.rows || [];
@@ -6958,20 +7015,29 @@ Target: ${channelId}`
           const status = String(w.status || "unknown");
           const hash = String(w.payout_tx_hash || w.fee_tx_hash || "Not available");
           const created = String(w.created_at || "Unknown");
+          const txUrl = w.payout_tx_hash
+            ? `https://tonviewer.com/transaction/${encodeURIComponent(String(w.payout_tx_hash))}`
+            : "https://tonviewer.com/";
           const body = [
-            "🧾 SINAPS — Withdrawal History",
-            `ID: ${String(w.withdrawal_id || w.id)}`,
-            `Amount: ${amountText} SNP`,
-            `Wallet: ${String(w.wallet_address || "Not available")}`,
-            `Status: ${status}`,
-            `Transaction hash: ${hash}`,
-            `Created: ${created}`
+            "🎉 SINAPS — Withdrawal Processed!",
+            "",
+            `💰 Amount: ${amountText} SNP`,
+            "📦 Status: ✅ Paid on-chain",
+            `🏦 To: ${String(w.wallet_address || "Not available")}`,
+            w.payout_tx_hash ? `🔗 View transaction: ${txUrl}` : `🔗 Transaction: ${hash}`,
+            `🕒 Completed: ${String(w.completed_at || created)}`
           ].join("\n");
 
           const posted = await telegramApi("sendMessage", {
             chat_id: channelId,
             text: body,
-            disable_web_page_preview: true
+            disable_web_page_preview: false,
+            reply_markup: {
+              inline_keyboard: [[
+                { text: "🚀 Open SINAPS Mini App", url: "https://t.me/SNPCOINBot?startapp" },
+                { text: "🔄 Swap on DeDust", url: "https://dedust.io/swap/GRAM/EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls?amount=1000000000" }
+              ]]
+            }
           });
           if (posted?.message_id) {
             await db.execute({
