@@ -138,15 +138,15 @@ let treasuryJettonWallet = null;
 const BOOST_LEVELS = {
 
   tap: [
-    { level: 2, price: 2000, name: "Tap ×2", description: "0.1 SNP per tap" },
-    { level: 3, price: 3000, name: "Tap ×3", description: "0.2 SNP per tap" },
-    { level: 4, price: 5000, name: "Tap ×4", description: "0.3 SNP per tap" },
-    { level: 5, price: 8000, name: "Tap ×5", description: "0.4 SNP per tap" },
-    { level: 6, price: 10000, name: "Tap ×6", description: "0.5 SNP per tap" },
-    { level: 7, price: 12000, name: "Tap ×7", description: "0.6 SNP per tap" },
-    { level: 8, price: 15000, name: "Tap ×8", description: "0.7 SNP per tap" },
-    { level: 9, price: 18000, name: "Tap ×9", description: "0.8 SNP per tap" },
-    { level: 10, price: 22000, name: "Tap ×10", description: "0.9 SNP per tap" }
+    { level: 2, price: 2000, name: "Tap ×2", description: "0.2 SNP per tap" },
+    { level: 3, price: 3000, name: "Tap ×3", description: "0.3 SNP per tap" },
+    { level: 4, price: 5000, name: "Tap ×4", description: "0.4 SNP per tap" },
+    { level: 5, price: 8000, name: "Tap ×5", description: "0.5 SNP per tap" },
+    { level: 6, price: 10000, name: "Tap ×6", description: "0.6 SNP per tap" },
+    { level: 7, price: 12000, name: "Tap ×7", description: "0.7 SNP per tap" },
+    { level: 8, price: 15000, name: "Tap ×8", description: "0.8 SNP per tap" },
+    { level: 9, price: 18000, name: "Tap ×9", description: "0.9 SNP per tap" },
+    { level: 10, price: 22000, name: "Tap ×10", description: "1.0 SNP per tap" }
   ],
 
   energy: [
@@ -1394,10 +1394,22 @@ await db.execute(`
   }
 
 
+  // Keep stored tap reward aligned with the user's level: level 1 = 0.1 SNP,
+  // level 5 = 0.5 SNP, ..., level 10 = 1.0 SNP.
   await db.execute(`
     UPDATE users
-    SET tap_power = 0.1
-    WHERE tap_power IS NULL OR (tap_boost_level <= 1 AND tap_power > 0.1)
+    SET tap_boost_level = CASE
+          WHEN tap_boost_level IS NULL OR tap_boost_level < 1 THEN 1
+          WHEN tap_boost_level > 10 THEN 10
+          ELSE tap_boost_level
+        END
+  `);
+
+  await db.execute(`
+    UPDATE users
+    SET tap_power = ROUND(tap_boost_level * 0.1, 1)
+    WHERE tap_power IS NULL
+       OR ABS(tap_power - ROUND(tap_boost_level * 0.1, 1)) > 0.000001
   `);
 
   await db.execute(`
@@ -1960,7 +1972,8 @@ app.post(
       }
 
       const energy = Math.max(0, Number(user.energy || 0));
-      const tapPower = Math.max(0.1, Number(user.tap_power || 0.1));
+      const tapLevel = Math.min(10, Math.max(1, Number(user.tap_boost_level || 1)));
+      const tapPower = Number((tapLevel * 0.1).toFixed(1));
       const usable = Math.min(count, energy);
 
       if (usable <= 0) {
@@ -2364,7 +2377,7 @@ app.post(
           `,
 
           args: [
-            Number((next.level - 1) / 10),
+            Number((next.level * 0.1).toFixed(1)),
             next.level,
             telegramId
           ]
@@ -2440,7 +2453,7 @@ app.post(
           `,
 
           args: [
-            Number((next.level - 1) / 10),
+            Number((next.level * 0.1).toFixed(1)),
             next.level,
             telegramId
           ]
