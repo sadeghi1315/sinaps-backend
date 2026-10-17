@@ -1375,7 +1375,8 @@ await db.execute(`
 
     ["payout_tx_hash", "TEXT"],
     ["payout_query_id", "TEXT"],
-    ["payout_submitted_at", "TEXT"]
+    ["payout_submitted_at", "TEXT"],
+    ["channel_posted_at", "TEXT"]
 
   ];
 
@@ -6920,6 +6921,77 @@ app.post(
       }
 
       const isAdmin = !!ADMIN_TELEGRAM_ID && senderId === ADMIN_TELEGRAM_ID && chatId === ADMIN_TELEGRAM_ID;
+
+      // One-time historical withdrawal backfill. Posts only rows not already
+      // published by this command; successful sends are marked in Turso.
+      if (/^\/withdrawals_backfill(?:@\w+)?$/i.test(text)) {
+        if (!isAdmin) {
+          await telegramApi("sendMessage", {
+            chat_id: chatId,
+            text: "⛔ Admin only."
+          });
+          return;
+        }
+
+        const channelId = String(process.env.WITHDRAWAL_CHANNEL_ID || "@SINAPS_Withdrawals").trim();
+        const pending = await db.execute({
+          sql: `SELECT id, withdrawal_id, telegram_id, wallet_address, amount, fee_ton,
+                       status, fee_tx_hash, payout_tx_hash, created_at, completed_at
+                FROM withdrawals
+                WHERE channel_posted_at IS NULL OR channel_posted_at = ''
+                ORDER BY created_at ASC, id ASC`
+        });
+        const rows = pending.rows || [];
+        let sent = 0;
+        let failed = 0;
+
+        await telegramApi("sendMessage", {
+          chat_id: chatId,
+          text: `📣 Historical withdrawal report started.
+Records to publish: ${rows.length}
+Target: ${channelId}`
+        });
+
+        for (const w of rows) {
+          const amountRaw = Number(w.amount || 0);
+          const amountText = Number.isFinite(amountRaw) ? String(amountRaw) : String(w.amount || "Unknown");
+          const status = String(w.status || "unknown");
+          const hash = String(w.payout_tx_hash || w.fee_tx_hash || "Not available");
+          const created = String(w.created_at || "Unknown");
+          const body = [
+            "🧾 SINAPS — Withdrawal History",
+            `ID: ${String(w.withdrawal_id || w.id)}`,
+            `Amount: ${amountText} SNP`,
+            `Wallet: ${String(w.wallet_address || "Not available")}`,
+            `Status: ${status}`,
+            `Transaction hash: ${hash}`,
+            `Created: ${created}`
+          ].join("\n");
+
+          const posted = await telegramApi("sendMessage", {
+            chat_id: channelId,
+            text: body,
+            disable_web_page_preview: true
+          });
+          if (posted?.message_id) {
+            await db.execute({
+              sql: "UPDATE withdrawals SET channel_posted_at = ? WHERE id = ?",
+              args: [new Date().toISOString(), w.id]
+            });
+            sent++;
+          } else {
+            failed++;
+          }
+          // Stay comfortably under Telegram's channel rate limits.
+          await new Promise(resolve => setTimeout(resolve, 1100));
+        }
+
+        await telegramApi("sendMessage", {
+          chat_id: chatId,
+          text: `✅ Historical withdrawal backfill finished.\nPublished: ${sent}\nFailed: ${failed}\nRemaining failed records can be retried by running /withdrawals_backfill again.`
+        });
+        return;
+      }
 
       if (/^\/broadcast(?:@\w+)?$/i.test(text)) {
         if (!isAdmin) {
