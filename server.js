@@ -94,7 +94,7 @@ const REFERRAL_RATE =
   0.15;
 
 const REFERRAL_JOIN_REWARD =
-  10;
+  50;
 
 const HOLDER_MIN_SNP =
   50000;
@@ -250,7 +250,7 @@ const TASKS = [
     name: "Hold 50,000 SNP",
     title: "Hold 50,000 SNP",
     icon: "💎",
-    reward: 100,
+    reward: 10,
     type: "holder",
     required: HOLDER_MIN_SNP,
     url: "#"
@@ -645,7 +645,7 @@ function publicUser(user) {
 
     tap_power:
       Number(
-        user.tap_power || 1
+        user.tap_power || 0.1
       ),
 
     tap_boost_level:
@@ -1397,7 +1397,7 @@ await db.execute(`
   await db.execute(`
     UPDATE users
     SET tap_power = 0.1
-    WHERE tap_power IS NULL
+    WHERE tap_power IS NULL OR (tap_boost_level <= 1 AND tap_power > 0.1)
   `);
 
   await db.execute(`
@@ -3519,7 +3519,7 @@ app.post("/api/spin/claim", async (req, res) => {
     } else {
       const normalSlots = [0, 1, 2, 3, 4, 5, 7, 8];
       prizeIndex = normalSlots[crypto.randomInt(normalSlots.length)];
-      const rewards = { 0: 1, 1: 2.5, 2: 5, 3: 10, 4: 25, 5: 50, 7: 0, 8: 0 };
+      const rewards = { 0: 0.1, 1: 0.25, 2: 0.5, 3: 1, 4: 2.5, 5: 5, 7: 0, 8: 0 };
       reward = rewards[prizeIndex];
       prizeType = reward > 0 ? "SNP" : "NONE";
     }
