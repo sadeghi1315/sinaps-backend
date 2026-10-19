@@ -1516,6 +1516,19 @@ await db.execute(`
   }
 
 
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS bot_user_activity (
+      telegram_id TEXT PRIMARY KEY,
+      username TEXT,
+      started_at TEXT NOT NULL,
+      last_start_at TEXT NOT NULL,
+      last_miniapp_visit_at TEXT,
+      last_reminder_at TEXT,
+      reminder_count INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_bot_activity_visit ON bot_user_activity(last_miniapp_visit_at)`);
+
   console.log(
     "SINAPS database migration completed successfully."
   );
@@ -1671,6 +1684,17 @@ app.post(
       const username =
         verified.username ||
         "";
+
+      const visitStamp = now();
+      await db.execute({
+        sql: `INSERT INTO bot_user_activity
+          (telegram_id, username, started_at, last_start_at, last_miniapp_visit_at, last_reminder_at, reminder_count)
+          VALUES (?, ?, ?, ?, ?, NULL, 0)
+          ON CONFLICT(telegram_id) DO UPDATE SET
+            username = excluded.username,
+            last_miniapp_visit_at = excluded.last_miniapp_visit_at`,
+        args: [telegramId, username, visitStamp, visitStamp, visitStamp]
+      });
 
       const startParam =
         String(
@@ -6948,6 +6972,63 @@ app.post(
 
 
 // ============================================================
+// INACTIVE USER REMINDERS
+// ============================================================
+
+const MINIAPP_URL = "https://sadeghi1315.github.io/sinaps-tap-to-earn/";
+let inactiveReminderRunInFlight = false;
+
+async function sendInactiveUserReminders() {
+  if (inactiveReminderRunInFlight) return;
+  inactiveReminderRunInFlight = true;
+  try {
+    const current = Date.now();
+    const inactiveThresholdMs = 6 * 60 * 60 * 1000;
+    const cooldownMs = 6 * 60 * 60 * 1000;
+    const result = await db.execute({
+      sql: `SELECT telegram_id, username, started_at, last_start_at, last_miniapp_visit_at, last_reminder_at, reminder_count
+            FROM bot_user_activity
+            ORDER BY COALESCE(last_reminder_at, '') ASC, COALESCE(last_miniapp_visit_at, started_at) ASC
+            LIMIT 500`,
+      args: []
+    });
+
+    let sent = 0;
+    for (const row of result.rows) {
+      if (sent >= 30) break;
+      const lastActivity = Date.parse(String(row.last_miniapp_visit_at || row.started_at || ""));
+      const lastReminder = Date.parse(String(row.last_reminder_at || ""));
+      if (!Number.isFinite(lastActivity) || current - lastActivity < inactiveThresholdMs) continue;
+      if (Number.isFinite(lastReminder) && current - lastReminder < cooldownMs) continue;
+
+      const delivered = await telegramApi("sendMessage", {
+        chat_id: String(row.telegram_id),
+        text: "🚀 SINAPS is waiting for you!\n\n🎁 Check your daily reward, try your Spin, and keep earning SNP.\n\nTap • Earn • Grow",
+        reply_markup: {
+          inline_keyboard: [[{ text: "🚀 Open SINAPS", web_app: { url: MINIAPP_URL } }]]
+        }
+      });
+      if (delivered) {
+        await db.execute({
+          sql: `UPDATE bot_user_activity
+                SET last_reminder_at = ?, reminder_count = reminder_count + 1
+                WHERE telegram_id = ?`,
+          args: [new Date().toISOString(), String(row.telegram_id)]
+        });
+        sent++;
+      }
+      // Keep outbound messages comfortably rate-limited.
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+    if (sent) console.log(`SINAPS inactive reminders sent: ${sent}`);
+  } catch (error) {
+    console.error("Inactive reminder job failed:", error?.message || error);
+  } finally {
+    inactiveReminderRunInFlight = false;
+  }
+}
+
+// ============================================================
 // TELEGRAM /START WEBHOOK
 // ============================================================
 
@@ -7065,6 +7146,17 @@ app.post(
         return;
       }
 
+      const startedAt = now();
+      await db.execute({
+        sql: `INSERT INTO bot_user_activity
+          (telegram_id, username, started_at, last_start_at, last_miniapp_visit_at, last_reminder_at, reminder_count)
+          VALUES (?, ?, ?, ?, NULL, NULL, 0)
+          ON CONFLICT(telegram_id) DO UPDATE SET
+            username = excluded.username,
+            last_start_at = excluded.last_start_at`,
+        args: [senderId, String(message.from?.username || ""), startedAt, startedAt]
+      });
+
       const photoUrl =
         "https://github.com/sadeghi1315/sinaps-tap-to-earn/blob/main/preview.png?raw=true";
 
@@ -7167,6 +7259,14 @@ async function start() {
     await initDB();
 
     setupTelegramWebhook();
+
+    // Check every six hours; inactive users can receive one reminder every six hours.
+    setInterval(() => {
+      sendInactiveUserReminders().catch(error => console.error("Reminder scheduler error:", error?.message || error));
+    }, 6 * 60 * 60 * 1000);
+    setTimeout(() => {
+      sendInactiveUserReminders().catch(error => console.error("Initial reminder check error:", error?.message || error));
+    }, 60 * 1000);
 
     app.listen(
 
