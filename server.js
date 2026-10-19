@@ -1327,6 +1327,16 @@ await db.execute(`
 
   `);
 
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS recurring_task_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      reward INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    )
+  `);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_recurring_task_user ON recurring_task_claims(telegram_id, task_id, created_at)`);
 
   await db.execute(`
 
@@ -3258,20 +3268,16 @@ async function getTaskStatus(
   telegramId
 ) {
 
-  const claimedResult =
-    await db.execute({
-
-      sql: `
-        SELECT task_id
-        FROM task_claims
-        WHERE telegram_id = ?
-          AND status = 'Completed'
-      `,
-
-      args: [
-        String(telegramId)
-      ]
-    });
+  const recurringIds = new Set(["channel", "group", "withdrawals_channel", "twitter", "like_retweet"]);
+  const claimedResult = await db.execute({
+    sql: `SELECT task_id FROM task_claims WHERE telegram_id = ? AND status = 'Completed'`,
+    args: [String(telegramId)]
+  });
+  const recurringResult = await db.execute({
+    sql: `SELECT task_id, MAX(created_at) AS last_claimed FROM recurring_task_claims WHERE telegram_id = ? GROUP BY task_id`,
+    args: [String(telegramId)]
+  });
+  const recurringLast = new Map(recurringResult.rows.map(row => [String(row.task_id), String(row.last_claimed || "")]));
 
 
   const claimed =
@@ -3298,10 +3304,14 @@ async function getTaskStatus(
   const staticTasks = TASKS.map(
     task => {
 
-      let completed =
-        claimed.has(
-          task.id
-        );
+      let completed = claimed.has(task.id);
+      let cooldown_seconds = 0;
+      if (recurringIds.has(String(task.id))) {
+        const last = recurringLast.get(String(task.id));
+        const lastMs = last ? new Date(last).getTime() : 0;
+        cooldown_seconds = lastMs ? Math.max(0, Math.ceil((lastMs + 86400000 - Date.now()) / 1000)) : 0;
+        completed = cooldown_seconds > 0;
+      }
 
 
       if (
@@ -3340,6 +3350,7 @@ async function getTaskStatus(
         ...task,
 
         completed,
+        cooldown_seconds,
 
         referral_count:
           task.type === "referral"
@@ -3365,7 +3376,9 @@ async function getTaskStatus(
       SELECT a.id, a.telegram_id, a.title, a.description, a.platform,
              a.target_url, a.reward_per_user, a.target_clicks, a.valid_clicks,
              (SELECT COUNT(*) FROM ad_task_clicks c
-                WHERE c.task_id = a.id AND c.telegram_id = ?) AS completed_by_user
+                WHERE c.task_id = a.id AND c.telegram_id = ?) AS completed_by_user,
+             (SELECT c.clicked_at FROM ad_task_clicks c
+                WHERE c.task_id = a.id AND c.telegram_id = ? LIMIT 1) AS last_clicked_at
       FROM ad_tasks a
       WHERE a.status = 'active'
         AND a.payment_verified = 1
@@ -3373,12 +3386,14 @@ async function getTaskStatus(
         AND CAST(a.telegram_id AS TEXT) <> ?
       ORDER BY a.created_at ASC
     `,
-    args: [String(telegramId), String(telegramId)]
+    args: [String(telegramId), String(telegramId), String(telegramId)]
   });
 
   const adTasks = adResult.rows
-    .filter(ad => Number(ad.completed_by_user || 0) === 0)
-    .map(ad => ({
+    .map(ad => {
+      const last = ad.last_clicked_at ? new Date(String(ad.last_clicked_at)).getTime() : 0;
+      const cooldownSeconds = last ? Math.max(0, Math.ceil((last + 24 * 60 * 60 * 1000 - Date.now()) / 1000)) : 0;
+      return ({
       id: `ad:${Number(ad.id)}`,
       type: "ad_task",
       name: String(ad.title || "Advertising task"),
@@ -3386,11 +3401,13 @@ async function getTaskStatus(
       icon: "📢",
       url: String(ad.target_url || ""),
       reward: Number(ad.reward_per_user || 10),
-      completed: false,
+      completed: cooldownSeconds > 0,
+      cooldown_seconds: cooldownSeconds,
       platform: String(ad.platform || ""),
       valid_clicks: Number(ad.valid_clicks || 0),
       target_clicks: Number(ad.target_clicks || 0)
-    }));
+    });
+    });
 
   return [...staticTasks, ...adTasks];
 }
@@ -3580,6 +3597,30 @@ app.post("/api/spin/ton-payout/claim", async (req, res) => {
   }
 });
 
+
+// ============================================================
+// REQUIRED TELEGRAM JOIN GATE
+// ============================================================
+app.post("/api/onboarding/verify", async (req, res) => {
+  try {
+    const verified = requireAuth(req, res);
+    if (!verified) return;
+    const destinations = [
+      { id: "channel", chat: "@SINAPS_COIN" },
+      { id: "withdrawals", chat: "@SINAPS_Withdrawals" },
+      { id: "group", chat: "@SINAPS_Group" }
+    ];
+    const results = await Promise.all(destinations.map(async item => ({
+      id: item.id,
+      joined: await isTelegramMember(item.chat, String(verified.id))
+    })));
+    const allJoined = results.every(item => item.joined);
+    return res.json({ ok: true, verified: allJoined, memberships: results });
+  } catch (error) {
+    console.error("/api/onboarding/verify", error);
+    return res.status(500).json({ error: "Could not verify Telegram memberships. Please try again." });
+  }
+});
 
 // ============================================================
 // GET TASKS
@@ -3919,21 +3960,24 @@ app.post("/api/ads/click", async (req, res) => {
       return res.status(403).json({ error: "You cannot click your own advertisement." });
     }
 
-    // A click is the completion event for an ad task: award once per user/ad.
-    // The unique key on ad_task_clicks prevents repeat clicks from paying twice.
-    try {
-      await tx.execute({
-        sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status, reviewed_at, reward_paid) VALUES (?, ?, ?, 'completed', ?, 1)`,
-        args: [adId, telegramId, now(), now()]
-      });
-    } catch (insertError) {
-      if (String(insertError.message || "").toLowerCase().includes("unique")) {
-        await tx.rollback(); tx = null;
-        const existingUser = await getUser(telegramId);
-        const clickCount = await db.execute({sql:`SELECT COUNT(*) AS click_count FROM ad_link_clicks WHERE task_id = ?`, args:[adId]});
-        return res.json({ok:true, already_completed:true, reward:0, balance:Number(existingUser?.balance || 0), click_count:Number(clickCount.rows[0]?.click_count || 0), message:"You have already claimed this ad reward."});
-      }
-      throw insertError;
+    // Allow one reward per user per ad every 24 hours. The unique row is reused
+    // after cooldown; main/static tasks are not affected.
+    const claimTime = now();
+    const claim = await tx.execute({
+      sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status, reviewed_at, reward_paid)
+            VALUES (?, ?, ?, 'completed', ?, 1)
+            ON CONFLICT(task_id, telegram_id) DO UPDATE SET
+              clicked_at = excluded.clicked_at, status = 'completed', reviewed_at = excluded.reviewed_at, reward_paid = 1
+            WHERE datetime(ad_task_clicks.clicked_at) <= datetime('now', '-24 hours')`,
+      args: [adId, telegramId, claimTime, claimTime]
+    });
+    if (Number(claim.rowsAffected || 0) !== 1) {
+      await tx.rollback(); tx = null;
+      const existingUser = await getUser(telegramId);
+      const previous = await db.execute({sql:`SELECT clicked_at FROM ad_task_clicks WHERE task_id = ? AND telegram_id = ? LIMIT 1`, args:[adId, telegramId]});
+      const last = previous.rows[0]?.clicked_at ? new Date(String(previous.rows[0].clicked_at)).getTime() : Date.now();
+      const remaining = Math.max(0, Math.ceil((last + 86400000 - Date.now()) / 1000));
+      return res.status(429).json({ok:false, cooldown_seconds:remaining, balance:Number(existingUser?.balance || 0), error:"This ad will be available again when the 24-hour timer ends."});
     }
 
     const advanced = await tx.execute({
@@ -4529,6 +4573,39 @@ app.post(
         ).trim();
 
 
+      const recurringTaskIds = new Set(["channel", "group", "withdrawals_channel", "twitter", "like_retweet"]);
+      if (recurringTaskIds.has(taskId)) {
+        const task = TASKS.find(item => String(item.id) === taskId);
+        if (!task) return res.status(400).json({ error: "Unknown task" });
+        const lastResult = await db.execute({
+          sql: `SELECT created_at FROM recurring_task_claims WHERE telegram_id = ? AND task_id = ? ORDER BY id DESC LIMIT 1`,
+          args: [telegramId, taskId]
+        });
+        const lastStamp = lastResult.rows[0]?.created_at ? new Date(String(lastResult.rows[0].created_at)).getTime() : 0;
+        const remaining = lastStamp ? Math.ceil((lastStamp + 86400000 - Date.now()) / 1000) : 0;
+        if (remaining > 0) return res.status(429).json({ error: `Available again in ${Math.ceil(remaining / 3600)}h ${Math.ceil((remaining % 3600) / 60)}m`, cooldown_seconds: remaining });
+        if (task.type === "telegram") {
+          const member = await isTelegramMember(task.chat, telegramId);
+          if (!member) return res.status(400).json({ error: "Join the Telegram channel/group first, then verify. The SINAPS bot must be an administrator to check membership." });
+        }
+        const reward = Math.max(0, safeInt(task.reward, 0));
+        let tx;
+        try {
+          tx = await db.transaction("write");
+          const stamp = now();
+          await tx.execute({ sql: `INSERT INTO recurring_task_claims (telegram_id, task_id, reward, created_at) VALUES (?, ?, ?, ?)`, args: [telegramId, taskId, reward, stamp] });
+          const credit = await tx.execute({ sql: `UPDATE users SET balance = balance + ? WHERE telegram_id = ?`, args: [reward, telegramId] });
+          if (Number(credit.rowsAffected || 0) !== 1) throw new Error("Could not credit task reward");
+          await tx.execute({ sql: `INSERT INTO transactions (telegram_id, type, amount, status, details, created_at) VALUES (?, 'TASK', ?, 'Completed', ?, ?)`, args: [telegramId, reward, `${task.name || task.id} (24h repeat)`, stamp] });
+          await tx.commit();
+        } catch (claimError) {
+          try { if (tx) await tx.rollback(); } catch (_) {}
+          throw claimError;
+        }
+        const fresh = await getUser(telegramId);
+        return res.json({ ok: true, task_id: taskId, reward, balance: Number(fresh?.balance || 0), cooldown_seconds: 86400 });
+      }
+
       if (taskId.startsWith("ad:")) {
         const adId = Number(taskId.slice(3));
         if (!Number.isSafeInteger(adId) || adId <= 0) {
@@ -4561,10 +4638,21 @@ app.post(
         let tx;
         try {
           tx = await db.transaction("write");
-          await tx.execute({
-            sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status, reviewed_at, reward_paid) VALUES (?, ?, ?, 'completed', ?, 1)`,
-            args: [adId, telegramId, now(), now()]
+          const claimTime = now();
+          const claim = await tx.execute({
+            sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status, reviewed_at, reward_paid)
+                  VALUES (?, ?, ?, 'completed', ?, 1)
+                  ON CONFLICT(task_id, telegram_id) DO UPDATE SET
+                    clicked_at = excluded.clicked_at, status = 'completed', reviewed_at = excluded.reviewed_at, reward_paid = 1
+                  WHERE datetime(ad_task_clicks.clicked_at) <= datetime('now', '-24 hours')`,
+            args: [adId, telegramId, claimTime, claimTime]
           });
+          if (Number(claim.rowsAffected || 0) !== 1) {
+            const previous = await tx.execute({sql:`SELECT clicked_at FROM ad_task_clicks WHERE task_id = ? AND telegram_id = ? LIMIT 1`, args:[adId, telegramId]});
+            const last = previous.rows[0]?.clicked_at ? new Date(String(previous.rows[0].clicked_at)).getTime() : Date.now();
+            const remaining = Math.max(0, Math.ceil((last + 86400000 - Date.now()) / 1000));
+            throw new Error(`This ad is on cooldown for ${remaining} more seconds.`);
+          }
           await tx.execute({
             sql: `UPDATE ad_tasks SET valid_clicks = valid_clicks + 1, status = CASE WHEN valid_clicks + 1 >= target_clicks THEN 'completed' ELSE status END, updated_at = ? WHERE id = ? AND status = 'active' AND valid_clicks < target_clicks`,
             args: [now(), adId]
