@@ -4132,7 +4132,8 @@ app.post("/api/ads/cancel", async (req, res) => {
   }
 });
 
-// Live SNP market pair and price, sourced from DexScreener.
+// SNP market price: try GeckoTerminal (which indexes the known TON/Uranus SNP pool),
+// then DexScreener as a fallback. Cache provider checks for six hours.
 app.get("/api/snp/market", async (req, res) => {
   try {
     const nowMs = Date.now();
@@ -4144,57 +4145,113 @@ app.get("/api/snp/market", async (req, res) => {
     const checkedAt = stateResult.rows[0]?.checked_at ? new Date(String(stateResult.rows[0].checked_at)).getTime() : 0;
     let snapshot = latest;
 
-    // Query the market provider no more than once every six hours, even when no pair is found.
     if (!checkedAt || !Number.isFinite(checkedAt) || nowMs - checkedAt >= 6 * 60 * 60 * 1000) {
-      const address = encodeURIComponent(String(SNP_CONTRACT || "").trim());
-      if (address) {
+      const tokenAddress = String(SNP_CONTRACT || "").trim();
+      let market = null;
+
+      // GeckoTerminal supports TON and has an indexed SNP/TON pool for this token.
+      if (tokenAddress) {
+        const geckoHeaders = { accept: "application/json;version=20230302" };
+        const geckoUrls = [
+          `https://api.geckoterminal.com/api/v2/networks/ton/pools/${encodeURIComponent(tokenAddress)}`,
+          `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${encodeURIComponent(tokenAddress)}/pools`
+        ];
+        for (const url of geckoUrls) {
+          try {
+            const response = await fetch(url, { headers: geckoHeaders, signal: AbortSignal.timeout(10000) });
+            if (!response.ok) continue;
+            const payload = await response.json();
+            const candidates = Array.isArray(payload?.data) ? payload.data : (payload?.data ? [payload.data] : []);
+            const pools = candidates.map(item => {
+              const a = item?.attributes || {};
+              const baseId = String(item?.relationships?.base_token?.data?.id || "");
+              const quoteId = String(item?.relationships?.quote_token?.data?.id || "");
+              const baseIsSnp = baseId.toLowerCase().endsWith(`_${tokenAddress.toLowerCase()}`) || baseId.toLowerCase() === `ton_${tokenAddress.toLowerCase()}`;
+              const quoteIsSnp = quoteId.toLowerCase().endsWith(`_${tokenAddress.toLowerCase()}`) || quoteId.toLowerCase() === `ton_${tokenAddress.toLowerCase()}`;
+              let price = Number(a.base_token_price_usd || 0);
+              let native = Number(a.base_token_price_native_currency || a.base_token_price_quote_token || 0);
+              if (quoteIsSnp && !baseIsSnp) {
+                price = Number(a.quote_token_price_usd || 0);
+                native = Number(a.quote_token_price_native_currency || a.quote_token_price_base_token || 0);
+              }
+              // For the direct known pool endpoint, GeckoTerminal's base price is the pool's token price.
+              if (!baseIsSnp && !quoteIsSnp && url.includes('/pools/')) {
+                price = Number(a.base_token_price_usd || 0);
+                native = Number(a.base_token_price_native_currency || a.base_token_price_quote_token || 0);
+              }
+              return { a, price, native, address: String(a.address || "") };
+            }).filter(x => x.address && x.price > 0 && Number(x.a.reserve_in_usd || 0) > 0)
+              .sort((a, b) => Number(b.a.reserve_in_usd || 0) - Number(a.a.reserve_in_usd || 0));
+            if (pools.length) { market = { ...pools[0], source: "geckoterminal" }; break; }
+          } catch (providerError) {
+            console.warn("GeckoTerminal SNP market lookup failed:", providerError?.message || providerError);
+          }
+        }
+      }
+
+      // Fallback provider, retaining strict checks for a real pair and nonzero price/liquidity.
+      if (!market && tokenAddress) {
         try {
-          const response = await fetch(`https://api.dexscreener.com/token-pairs/v1/ton/${address}`, {
-            headers: { accept: "application/json" },
-            signal: AbortSignal.timeout(10000)
+          const response = await fetch(`https://api.dexscreener.com/token-pairs/v1/ton/${encodeURIComponent(tokenAddress)}`, {
+            headers: { accept: "application/json" }, signal: AbortSignal.timeout(10000)
           });
           if (response.ok) {
             const payload = await response.json();
             const pairs = Array.isArray(payload) ? payload : [];
             const active = pairs.filter(pair => Number(pair?.liquidity?.usd || 0) > 0 && pair?.pairAddress && Number(pair?.priceUsd || 0) > 0)
               .sort((a, b) => Number(b?.liquidity?.usd || 0) - Number(a?.liquidity?.usd || 0));
-            const pair = active[0];
-            if (pair) {
-              const stamp = new Date().toISOString();
-              await db.execute({
-                sql: `INSERT INTO snp_market_snapshots (token_address, pair_address, price_usd, price_native, change_24h, liquidity_usd, volume_24h, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                args: [String(SNP_CONTRACT), String(pair.pairAddress), Number(pair.priceUsd), pair.priceNative ? Number(pair.priceNative) : null, Number(pair?.priceChange?.h24 || 0), Number(pair?.liquidity?.usd || 0), Number(pair?.volume?.h24 || 0), stamp]
-              });
-              const inserted = await db.execute({ sql: `SELECT * FROM snp_market_snapshots ORDER BY captured_at DESC, id DESC LIMIT 1` });
-              snapshot = inserted.rows[0] || latest;
+            if (active[0]) {
+              const pair = active[0];
+              market = {
+                address: String(pair.pairAddress), price: Number(pair.priceUsd),
+                native: pair.priceNative ? Number(pair.priceNative) : null,
+                change: Number(pair?.priceChange?.h24 || 0), liquidity: Number(pair?.liquidity?.usd || 0),
+                volume: Number(pair?.volume?.h24 || 0), source: "dexscreener", raw: pair
+              };
             }
           }
         } catch (providerError) {
-          console.warn("SNP market refresh failed; serving last cached snapshot if available:", providerError?.message || providerError);
+          console.warn("DexScreener SNP market lookup failed:", providerError?.message || providerError);
         }
-        await db.execute({
-          sql: `INSERT INTO snp_market_refresh_state (id, checked_at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET checked_at = excluded.checked_at`,
-          args: [new Date().toISOString()]
-        });
       }
+
+      if (market) {
+        const a = market.a || {};
+        const raw = market.raw || {};
+        const stamp = new Date().toISOString();
+        await db.execute({
+          sql: `INSERT INTO snp_market_snapshots (token_address, pair_address, price_usd, price_native, change_24h, liquidity_usd, volume_24h, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [tokenAddress, market.address, market.price,
+            Number.isFinite(market.native) && market.native > 0 ? market.native : null,
+            Number(market.change ?? a?.price_change_percentage?.h24 ?? 0),
+            Number(market.liquidity ?? a?.reserve_in_usd ?? 0),
+            Number(market.volume ?? a?.volume_usd?.h24 ?? 0), stamp]
+        });
+        const inserted = await db.execute({ sql: `SELECT * FROM snp_market_snapshots ORDER BY captured_at DESC, id DESC LIMIT 1` });
+        snapshot = inserted.rows[0] || latest;
+      }
+      await db.execute({
+        sql: `INSERT INTO snp_market_refresh_state (id, checked_at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET checked_at = excluded.checked_at`,
+        args: [new Date().toISOString()]
+      });
     }
 
     const historyResult = await db.execute({
       sql: `SELECT price_usd, price_native, change_24h, captured_at FROM snp_market_snapshots ORDER BY captured_at DESC, id DESC LIMIT 40`
     });
     const history = historyResult.rows.slice().reverse().map(row => ({
-      price_usd: Number(row.price_usd || 0),
-      price_native: row.price_native == null ? null : Number(row.price_native),
-      change_24h: Number(row.change_24h || 0),
-      captured_at: String(row.captured_at || "")
+      price_usd: Number(row.price_usd || 0), price_native: row.price_native == null ? null : Number(row.price_native),
+      change_24h: Number(row.change_24h || 0), captured_at: String(row.captured_at || "")
     }));
     if (!snapshot) {
-      return res.json({ ok: true, available: false, token_address: SNP_CONTRACT, history, refresh_hours: 6, approximate: true });
+      return res.json({ ok: true, available: false, token_address: SNP_CONTRACT, history, refresh_hours: 6, approximate: true, reason: "No indexed SNP market pair returned a valid price." });
     }
+    const pairAddress = String(snapshot.pair_address || "");
+    const geckoPairUrl = `https://www.geckoterminal.com/ton/pools/${encodeURIComponent(pairAddress)}`;
     return res.json({
       ok: true, available: Number(snapshot.price_usd || 0) > 0, approximate: true,
-      token_address: SNP_CONTRACT, pair_address: String(snapshot.pair_address || ""),
-      pair_url: `https://dexscreener.com/ton/${String(snapshot.pair_address || "")}`,
+      token_address: SNP_CONTRACT, pair_address: pairAddress,
+      pair_url: geckoPairUrl,
       price_usd: snapshot.price_usd == null ? null : Number(snapshot.price_usd),
       price_native: snapshot.price_native == null ? null : Number(snapshot.price_native),
       change_24h: Number(snapshot.change_24h || 0), liquidity_usd: Number(snapshot.liquidity_usd || 0),
