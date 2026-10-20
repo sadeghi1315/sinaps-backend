@@ -1090,6 +1090,22 @@ async function initDB() {
   );
 
 await db.execute(`
+  CREATE TABLE IF NOT EXISTS snp_market_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    pair_address TEXT NOT NULL,
+    price_usd REAL,
+    price_native REAL,
+    change_24h REAL DEFAULT 0,
+    liquidity_usd REAL DEFAULT 0,
+    volume_24h REAL DEFAULT 0,
+    captured_at TEXT NOT NULL
+  )
+`);
+await db.execute(`CREATE INDEX IF NOT EXISTS idx_snp_market_snapshots_time ON snp_market_snapshots(captured_at)`);
+await db.execute(`CREATE TABLE IF NOT EXISTS snp_market_refresh_state (id INTEGER PRIMARY KEY CHECK (id = 1), checked_at TEXT NOT NULL)`);
+
+await db.execute(`
   CREATE TABLE IF NOT EXISTS ad_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id TEXT NOT NULL,
@@ -3415,8 +3431,8 @@ async function getTaskStatus(
 
   const adTasks = adResult.rows
     .map(ad => {
-      const last = ad.last_clicked_at ? new Date(String(ad.last_clicked_at)).getTime() : 0;
-      const cooldownSeconds = last ? Math.max(0, Math.ceil((last + 24 * 60 * 60 * 1000 - Date.now()) / 1000)) : 0;
+      // Advertising tasks are one-time per user. Any prior click/claim permanently completes it.
+      const completed = Boolean(ad.last_clicked_at);
       return ({
       id: `ad:${Number(ad.id)}`,
       type: "ad_task",
@@ -3425,8 +3441,8 @@ async function getTaskStatus(
       icon: "📢",
       url: String(ad.target_url || ""),
       reward: Number(ad.reward_per_user || 10),
-      completed: cooldownSeconds > 0,
-      cooldown_seconds: cooldownSeconds,
+      completed,
+      cooldown_seconds: 0,
       platform: String(ad.platform || ""),
       valid_clicks: Number(ad.valid_clicks || 0),
       target_clicks: Number(ad.target_clicks || 0)
@@ -3984,24 +4000,18 @@ app.post("/api/ads/click", async (req, res) => {
       return res.status(403).json({ error: "You cannot click your own advertisement." });
     }
 
-    // Allow one reward per user per ad every 24 hours. The unique row is reused
-    // after cooldown; main/static tasks are not affected.
+    // Advertising tasks can be completed only once per user, with no 24-hour reset.
     const claimTime = now();
     const claim = await tx.execute({
       sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status, reviewed_at, reward_paid)
             VALUES (?, ?, ?, 'completed', ?, 1)
-            ON CONFLICT(task_id, telegram_id) DO UPDATE SET
-              clicked_at = excluded.clicked_at, status = 'completed', reviewed_at = excluded.reviewed_at, reward_paid = 1
-            WHERE datetime(ad_task_clicks.clicked_at) <= datetime('now', '-24 hours')`,
+            ON CONFLICT(task_id, telegram_id) DO NOTHING`,
       args: [adId, telegramId, claimTime, claimTime]
     });
     if (Number(claim.rowsAffected || 0) !== 1) {
       await tx.rollback(); tx = null;
       const existingUser = await getUser(telegramId);
-      const previous = await db.execute({sql:`SELECT clicked_at FROM ad_task_clicks WHERE task_id = ? AND telegram_id = ? LIMIT 1`, args:[adId, telegramId]});
-      const last = previous.rows[0]?.clicked_at ? new Date(String(previous.rows[0].clicked_at)).getTime() : Date.now();
-      const remaining = Math.max(0, Math.ceil((last + 86400000 - Date.now()) / 1000));
-      return res.status(429).json({ok:false, cooldown_seconds:remaining, balance:Number(existingUser?.balance || 0), error:"This ad will be available again when the 24-hour timer ends."});
+      return res.status(409).json({ok:false, already_completed:true, balance:Number(existingUser?.balance || 0), error:"You have already completed this advertising task."});
     }
 
     const advanced = await tx.execute({
@@ -4125,33 +4135,76 @@ app.post("/api/ads/cancel", async (req, res) => {
 // Live SNP market pair and price, sourced from DexScreener.
 app.get("/api/snp/market", async (req, res) => {
   try {
-    const address = encodeURIComponent(String(SNP_CONTRACT || "").trim());
-    if (!address) return res.json({ ok: true, available: false });
-    const response = await fetch(`https://api.dexscreener.com/token-pairs/v1/ton/${address}`, {
-      headers: { accept: "application/json" }
+    const nowMs = Date.now();
+    const latestResult = await db.execute({
+      sql: `SELECT * FROM snp_market_snapshots ORDER BY captured_at DESC, id DESC LIMIT 1`
     });
-    if (!response.ok) return res.status(502).json({ ok: false, available: false, error: "Market provider unavailable." });
-    const payload = await response.json();
-    const pairs = Array.isArray(payload) ? payload : [];
-    const active = pairs.filter(pair => Number(pair?.liquidity?.usd || 0) > 0 && pair?.pairAddress)
-      .sort((a, b) => Number(b?.liquidity?.usd || 0) - Number(a?.liquidity?.usd || 0));
-    const pair = active[0];
-    if (!pair) return res.json({ ok: true, available: false, token_address: SNP_CONTRACT });
+    const latest = latestResult.rows[0] || null;
+    const stateResult = await db.execute({ sql: `SELECT checked_at FROM snp_market_refresh_state WHERE id = 1 LIMIT 1` });
+    const checkedAt = stateResult.rows[0]?.checked_at ? new Date(String(stateResult.rows[0].checked_at)).getTime() : 0;
+    let snapshot = latest;
+
+    // Query the market provider no more than once every six hours, even when no pair is found.
+    if (!checkedAt || !Number.isFinite(checkedAt) || nowMs - checkedAt >= 6 * 60 * 60 * 1000) {
+      const address = encodeURIComponent(String(SNP_CONTRACT || "").trim());
+      if (address) {
+        try {
+          const response = await fetch(`https://api.dexscreener.com/token-pairs/v1/ton/${address}`, {
+            headers: { accept: "application/json" },
+            signal: AbortSignal.timeout(10000)
+          });
+          if (response.ok) {
+            const payload = await response.json();
+            const pairs = Array.isArray(payload) ? payload : [];
+            const active = pairs.filter(pair => Number(pair?.liquidity?.usd || 0) > 0 && pair?.pairAddress && Number(pair?.priceUsd || 0) > 0)
+              .sort((a, b) => Number(b?.liquidity?.usd || 0) - Number(a?.liquidity?.usd || 0));
+            const pair = active[0];
+            if (pair) {
+              const stamp = new Date().toISOString();
+              await db.execute({
+                sql: `INSERT INTO snp_market_snapshots (token_address, pair_address, price_usd, price_native, change_24h, liquidity_usd, volume_24h, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                args: [String(SNP_CONTRACT), String(pair.pairAddress), Number(pair.priceUsd), pair.priceNative ? Number(pair.priceNative) : null, Number(pair?.priceChange?.h24 || 0), Number(pair?.liquidity?.usd || 0), Number(pair?.volume?.h24 || 0), stamp]
+              });
+              const inserted = await db.execute({ sql: `SELECT * FROM snp_market_snapshots ORDER BY captured_at DESC, id DESC LIMIT 1` });
+              snapshot = inserted.rows[0] || latest;
+            }
+          }
+        } catch (providerError) {
+          console.warn("SNP market refresh failed; serving last cached snapshot if available:", providerError?.message || providerError);
+        }
+        await db.execute({
+          sql: `INSERT INTO snp_market_refresh_state (id, checked_at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET checked_at = excluded.checked_at`,
+          args: [new Date().toISOString()]
+        });
+      }
+    }
+
+    const historyResult = await db.execute({
+      sql: `SELECT price_usd, price_native, change_24h, captured_at FROM snp_market_snapshots ORDER BY captured_at DESC, id DESC LIMIT 40`
+    });
+    const history = historyResult.rows.slice().reverse().map(row => ({
+      price_usd: Number(row.price_usd || 0),
+      price_native: row.price_native == null ? null : Number(row.price_native),
+      change_24h: Number(row.change_24h || 0),
+      captured_at: String(row.captured_at || "")
+    }));
+    if (!snapshot) {
+      return res.json({ ok: true, available: false, token_address: SNP_CONTRACT, history, refresh_hours: 6, approximate: true });
+    }
     return res.json({
-      ok: true,
-      available: true,
-      token_address: SNP_CONTRACT,
-      pair_address: pair.pairAddress,
-      pair_url: pair.url || `https://dexscreener.com/ton/${pair.pairAddress}`,
-      price_usd: pair.priceUsd || null,
-      price_native: pair.priceNative || null,
-      change_24h: Number(pair?.priceChange?.h24 || 0),
-      liquidity_usd: Number(pair?.liquidity?.usd || 0),
-      volume_24h: Number(pair?.volume?.h24 || 0)
+      ok: true, available: Number(snapshot.price_usd || 0) > 0, approximate: true,
+      token_address: SNP_CONTRACT, pair_address: String(snapshot.pair_address || ""),
+      pair_url: `https://dexscreener.com/ton/${String(snapshot.pair_address || "")}`,
+      price_usd: snapshot.price_usd == null ? null : Number(snapshot.price_usd),
+      price_native: snapshot.price_native == null ? null : Number(snapshot.price_native),
+      change_24h: Number(snapshot.change_24h || 0), liquidity_usd: Number(snapshot.liquidity_usd || 0),
+      volume_24h: Number(snapshot.volume_24h || 0), captured_at: String(snapshot.captured_at || ""),
+      next_refresh_at: new Date((new Date(String(snapshot.captured_at)).getTime() || nowMs) + 6 * 60 * 60 * 1000).toISOString(),
+      refresh_hours: 6, history
     });
   } catch (error) {
     console.error("/api/snp/market:", error);
-    return res.status(502).json({ ok: false, available: false, error: "Could not load live SNP market data." });
+    return res.status(500).json({ ok: false, available: false, error: "Could not load cached SNP market data." });
   }
 });
 
@@ -4666,16 +4719,11 @@ app.post(
           const claim = await tx.execute({
             sql: `INSERT INTO ad_task_clicks (task_id, telegram_id, clicked_at, status, reviewed_at, reward_paid)
                   VALUES (?, ?, ?, 'completed', ?, 1)
-                  ON CONFLICT(task_id, telegram_id) DO UPDATE SET
-                    clicked_at = excluded.clicked_at, status = 'completed', reviewed_at = excluded.reviewed_at, reward_paid = 1
-                  WHERE datetime(ad_task_clicks.clicked_at) <= datetime('now', '-24 hours')`,
+                  ON CONFLICT(task_id, telegram_id) DO NOTHING`,
             args: [adId, telegramId, claimTime, claimTime]
           });
           if (Number(claim.rowsAffected || 0) !== 1) {
-            const previous = await tx.execute({sql:`SELECT clicked_at FROM ad_task_clicks WHERE task_id = ? AND telegram_id = ? LIMIT 1`, args:[adId, telegramId]});
-            const last = previous.rows[0]?.clicked_at ? new Date(String(previous.rows[0].clicked_at)).getTime() : Date.now();
-            const remaining = Math.max(0, Math.ceil((last + 86400000 - Date.now()) / 1000));
-            throw new Error(`This ad is on cooldown for ${remaining} more seconds.`);
+            throw new Error("You have already completed this advertising task.");
           }
           await tx.execute({
             sql: `UPDATE ad_tasks SET valid_clicks = valid_clicks + 1, status = CASE WHEN valid_clicks + 1 >= target_clicks THEN 'completed' ELSE status END, updated_at = ? WHERE id = ? AND status = 'active' AND valid_clicks < target_clicks`,
