@@ -4145,16 +4145,16 @@ app.get("/api/snp/market", async (req, res) => {
     const checkedAt = stateResult.rows[0]?.checked_at ? new Date(String(stateResult.rows[0].checked_at)).getTime() : 0;
     let snapshot = latest;
 
-    if (!checkedAt || !Number.isFinite(checkedAt) || nowMs - checkedAt >= 6 * 60 * 60 * 1000) {
+    if (String(req.query.force || "") === "1" || !checkedAt || !Number.isFinite(checkedAt) || nowMs - checkedAt >= 6 * 60 * 60 * 1000) {
       const tokenAddress = String(SNP_CONTRACT || "").trim();
       let market = null;
 
       // GeckoTerminal supports TON and has an indexed SNP/TON pool for this token.
       if (tokenAddress) {
         const geckoHeaders = { accept: "application/json;version=20230302" };
+        // The token address is not a pool address. Query the token's pool list only.
         const geckoUrls = [
-          `https://api.geckoterminal.com/api/v2/networks/ton/pools/${encodeURIComponent(tokenAddress)}`,
-          `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${encodeURIComponent(tokenAddress)}/pools`
+          `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${encodeURIComponent(tokenAddress)}/pools?page=1`
         ];
         for (const url of geckoUrls) {
           try {
@@ -4164,20 +4164,19 @@ app.get("/api/snp/market", async (req, res) => {
             const candidates = Array.isArray(payload?.data) ? payload.data : (payload?.data ? [payload.data] : []);
             const pools = candidates.map(item => {
               const a = item?.attributes || {};
-              const baseId = String(item?.relationships?.base_token?.data?.id || "");
-              const quoteId = String(item?.relationships?.quote_token?.data?.id || "");
-              const baseIsSnp = baseId.toLowerCase().endsWith(`_${tokenAddress.toLowerCase()}`) || baseId.toLowerCase() === `ton_${tokenAddress.toLowerCase()}`;
-              const quoteIsSnp = quoteId.toLowerCase().endsWith(`_${tokenAddress.toLowerCase()}`) || quoteId.toLowerCase() === `ton_${tokenAddress.toLowerCase()}`;
+              const baseId = String(item?.relationships?.base_token?.data?.id || "").toLowerCase();
+              const quoteId = String(item?.relationships?.quote_token?.data?.id || "").toLowerCase();
+              let rawAddress = "";
+              try { rawAddress = Address.parse(tokenAddress).toRawString().toLowerCase().replace(":", "_"); } catch (_) {}
+              const addressKeys = [tokenAddress.toLowerCase(), rawAddress, rawAddress.replace("_", "")].filter(Boolean);
+              const matchesToken = id => addressKeys.some(key => id === `ton_${key}` || id.endsWith(`_${key}`) || id.includes(key));
+              const baseIsSnp = matchesToken(baseId);
+              const quoteIsSnp = matchesToken(quoteId);
               let price = Number(a.base_token_price_usd || 0);
               let native = Number(a.base_token_price_native_currency || a.base_token_price_quote_token || 0);
               if (quoteIsSnp && !baseIsSnp) {
                 price = Number(a.quote_token_price_usd || 0);
                 native = Number(a.quote_token_price_native_currency || a.quote_token_price_base_token || 0);
-              }
-              // For the direct known pool endpoint, GeckoTerminal's base price is the pool's token price.
-              if (!baseIsSnp && !quoteIsSnp && url.includes('/pools/')) {
-                price = Number(a.base_token_price_usd || 0);
-                native = Number(a.base_token_price_native_currency || a.base_token_price_quote_token || 0);
               }
               return { a, price, native, address: String(a.address || "") };
             }).filter(x => x.address && x.price > 0 && Number(x.a.reserve_in_usd || 0) > 0)
@@ -4192,12 +4191,12 @@ app.get("/api/snp/market", async (req, res) => {
       // Fallback provider, retaining strict checks for a real pair and nonzero price/liquidity.
       if (!market && tokenAddress) {
         try {
-          const response = await fetch(`https://api.dexscreener.com/token-pairs/v1/ton/${encodeURIComponent(tokenAddress)}`, {
+          const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(tokenAddress)}`, {
             headers: { accept: "application/json" }, signal: AbortSignal.timeout(10000)
           });
           if (response.ok) {
             const payload = await response.json();
-            const pairs = Array.isArray(payload) ? payload : [];
+            const pairs = Array.isArray(payload) ? payload : (Array.isArray(payload?.pairs) ? payload.pairs : []);
             const active = pairs.filter(pair => Number(pair?.liquidity?.usd || 0) > 0 && pair?.pairAddress && Number(pair?.priceUsd || 0) > 0)
               .sort((a, b) => Number(b?.liquidity?.usd || 0) - Number(a?.liquidity?.usd || 0));
             if (active[0]) {
