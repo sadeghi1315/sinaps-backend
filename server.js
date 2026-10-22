@@ -1401,7 +1401,8 @@ await db.execute(`
 
     ["payout_tx_hash", "TEXT"],
     ["payout_query_id", "TEXT"],
-    ["payout_submitted_at", "TEXT"]
+    ["payout_submitted_at", "TEXT"],
+    ["channel_posted_at", "TEXT"]
 
   ];
 
@@ -1600,6 +1601,71 @@ async function telegramApi(
   } catch (error) {
     console.error(`Telegram API fetch failed for ${method}:`, error.message);
     return null;
+  }
+}
+
+
+// Publish only verified, successful on-chain SNP withdrawals to the public channel.
+// Posting errors are logged and never block a successful withdrawal response.
+async function publishSuccessfulWithdrawal(withdrawalId) {
+  try {
+    const channelId = String(process.env.WITHDRAWAL_CHANNEL_ID || "@SINAPS_Withdrawals").trim();
+    if (!channelId) {
+      console.error("Withdrawal channel posting skipped: WITHDRAWAL_CHANNEL_ID is empty.");
+      return false;
+    }
+
+    const result = await db.execute({
+      sql: `SELECT id, withdrawal_id, telegram_id, wallet_address, amount,
+                   status, payout_tx_hash, created_at, completed_at, channel_posted_at
+            FROM withdrawals WHERE withdrawal_id = ? LIMIT 1`,
+      args: [String(withdrawalId)]
+    });
+
+    const w = result.rows?.[0];
+    if (!w || !["paid", "completed", "success", "successful"].includes(String(w.status || "").toLowerCase())) {
+      return false;
+    }
+    if (w.channel_posted_at) return true;
+
+    const amountRaw = Number(w.amount || 0);
+    const amountText = Number.isFinite(amountRaw) ? String(amountRaw) : String(w.amount || "Unknown");
+    const wallet = String(w.wallet_address || "Not available");
+    const hash = String(w.payout_tx_hash || "").trim();
+    const txUrl = hash ? `https://tonviewer.com/transaction/${encodeURIComponent(hash)}` : "https://tonviewer.com/";
+    const body = [
+      "🎉 SINAPS — New Withdrawal Processed!",
+      "",
+      `💰 Amount: ${amountText} SNP`,
+      "📦 Status: ✅ Paid on-chain",
+      `🏦 To: ${wallet}`,
+      hash ? `🔗 Transaction: ${txUrl}` : "🔗 Transaction: hash unavailable",
+      `🕒 Completed: ${String(w.completed_at || w.created_at || "Unknown")}`
+    ].join("\n");
+
+    const posted = await telegramApi("sendMessage", {
+      chat_id: channelId,
+      text: body,
+      disable_web_page_preview: false,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "📈 SNP Chart", url: "https://dexscreener.com/ton/eqamlleruvinn9pwfvrlr_ajdvhd5pkmelnou5bndpvxv0ls" },
+          { text: "🔄 Swap on DeDust", url: "https://dedust.io/swap/GRAM/EQAmLlerUViNn9PwFVRlR_AjDvhd5pkmeLNOu5bNDpvXV0ls?amount=1000000000" }
+        ]]
+      }
+    });
+
+    if (!posted?.message_id) return false;
+
+    await db.execute({
+      sql: "UPDATE withdrawals SET channel_posted_at = ? WHERE id = ? AND (channel_posted_at IS NULL OR channel_posted_at = '')",
+      args: [new Date().toISOString(), w.id]
+    });
+    console.log(`Withdrawal ${String(withdrawalId)} posted to ${channelId}.`);
+    return true;
+  } catch (error) {
+    console.error("publishSuccessfulWithdrawal failed:", error?.message || error);
+    return false;
   }
 }
 
@@ -6869,6 +6935,12 @@ app.post(
         });
 
 
+      // Publish only after the database confirms that the on-chain payout is paid.
+      // Failure to post must not affect withdrawal status or the API response.
+      if (String(fresh.rows[0]?.status || "").toLowerCase() === "paid") {
+        await publishSuccessfulWithdrawal(id);
+      }
+
       res.json({
 
         ok:
@@ -7184,7 +7256,44 @@ app.post(
 
       const isAdmin = !!ADMIN_TELEGRAM_ID && senderId === ADMIN_TELEGRAM_ID && chatId === ADMIN_TELEGRAM_ID;
 
-      if (/^\/broadcast(?:@\w+)?$/i.test(text)) {
+      // Admin-only retry for successful withdrawals that were not posted earlier.
+      if (/^\/withdrawals_backfill(?:@\w+)?$/i.test(text)) {
+        if (!isAdmin) {
+          await telegramApi("sendMessage", {
+            chat_id: chatId,
+            text: "⛔ Admin only."
+          });
+          return;
+        }
+
+        const channelId = String(process.env.WITHDRAWAL_CHANNEL_ID || "@SINAPS_Withdrawals").trim();
+        const pending = await db.execute({
+          sql: `SELECT withdrawal_id
+                FROM withdrawals
+                WHERE (channel_posted_at IS NULL OR channel_posted_at = '')
+                  AND LOWER(COALESCE(status, '')) IN ('paid', 'completed', 'success', 'successful')
+                ORDER BY created_at ASC, id ASC`
+        });
+
+        const rows = pending.rows || [];
+        let sent = 0;
+        let failed = 0;
+
+        for (const row of rows) {
+          const ok = await publishSuccessfulWithdrawal(row.withdrawal_id);
+          if (ok) sent++;
+          else failed++;
+          await new Promise(resolve => setTimeout(resolve, 1100));
+        }
+
+        await telegramApi("sendMessage", {
+          chat_id: chatId,
+          text: `✅ Withdrawal channel check finished.\nTarget: ${channelId}\nSuccessful posts: ${sent}\nFailed/not posted: ${failed}\nRecords checked: ${rows.length}`
+        });
+        return;
+      }
+
+      if (/^\/broadcast(?:@\\w+)?$/i.test(text)) {
         if (!isAdmin) {
           await telegramApi("sendMessage", { chat_id: chatId, text: "⛔ This command is only available to the bot administrator." });
           return;
